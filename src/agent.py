@@ -151,8 +151,11 @@ class Agent:
         new_attrs = extract_attributes(user_message)
         price = _parse_price_constraint(user_message)
 
+        user_pref = new_attrs.pop("feature", None)
         for attr, value in new_attrs.items():
             self._ledger.set_constraint(session_id, attr, value)
+        if user_pref:
+            self._ledger.add_user_preference(session_id, user_pref)
 
         if price:
             with self._ledger.session(session_id) as s:

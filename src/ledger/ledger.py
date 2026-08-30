@@ -26,7 +26,7 @@ def _empty_entry(session_id: str, user_profile: dict) -> dict:
         "turn": 0,
         "intent": None,
         "constraints": {},
-        "soft_preferences": [],
+        "user_preference": [],
         "asked_attributes": [],
         "search_key": {},
     }
@@ -118,14 +118,14 @@ class LedgerService:
             self._store[session_id]["constraints"][attribute] = [value]
 
     def clear_constraints(self, session_id: str) -> None:
-        """Wipe constraints and soft preferences on intent override."""
+        """Wipe constraints and user preferences on intent override."""
         with self._session_lock(session_id):
             self._store[session_id]["constraints"].clear()
-            self._store[session_id]["soft_preferences"].clear()
+            self._store[session_id]["user_preference"].clear()
 
-    def add_soft_preference(self, session_id: str, preference: str) -> None:
+    def add_user_preference(self, session_id: str, preference: str) -> None:
         with self._session_lock(session_id):
-            prefs = self._store[session_id]["soft_preferences"]
+            prefs = self._store[session_id]["user_preference"]
             if preference not in prefs:
                 prefs.append(preference)
 
