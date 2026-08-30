@@ -160,6 +160,36 @@ class Retriever:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def title_relevant_ids(
+        self, terms: set[str] | list[str], top_k: int = 500
+    ) -> set[str]:
+        """``parent_asin``s whose ``title``/``categories`` prefix-match any of
+        ``terms``.
+
+        Used as a hard relevance gate on the whole-catalog fallback (when
+        category bucket resolution fails): unlike ``retrieve_bm25``, whose
+        terms are plain quoted phrase matches, prefix matching here means a
+        singular query term ("dress") still matches plural/inflected catalog
+        text ("dresses") without needing every caller to pre-stem its terms.
+        """
+        cleaned = [t.strip().lower() for t in terms if t and t.strip()]
+        if not cleaned:
+            return set()
+        clauses = [
+            f'{{title categories}}: {re.sub(r"[^a-z0-9]", "", term)}*'
+            for term in cleaned
+            if re.sub(r"[^a-z0-9]", "", term)
+        ]
+        if not clauses:
+            return set()
+        match_expression = " OR ".join(clauses)
+        sql = (
+            f"SELECT parent_asin FROM {TABLE_NAME} WHERE {TABLE_NAME} MATCH ? "
+            f"LIMIT ?"
+        )
+        rows = self.catalog.execute(sql, [match_expression, top_k])
+        return {str(row[0]) for row in rows}
+
     def _build_match_expression(self, search_key: dict[str, list]) -> str:
         """Build the FTS5 MATCH expression from the text fields, expanding
         each field's terms into its mapped columns via column-filter syntax.

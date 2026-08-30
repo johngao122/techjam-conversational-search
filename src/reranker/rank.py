@@ -17,7 +17,7 @@ import os
 from src.catalog.catalog import Catalog
 from src.catalog.loader import load_catalog_rows
 from src.reranker.coverage import Product, compile_constraints
-from src.retrieval.buckets import BucketIndex
+from src.retrieval.buckets import BucketIndex, head_noun_token
 from src.retrieval.constraint_index import ConstraintIndex, is_inert, prepare
 from src.retrieval.retrieval import Retriever
 from src.reranker.types import RankResult
@@ -186,6 +186,25 @@ class Reranker:
             )
             if bm25_pool:
                 pool = bm25_pool
+
+            # Title-relevance gate: the transcript-wide BM25 pass above treats
+            # the item type as just one soft OR'd term among color/budget/etc,
+            # so an off-type product with strong matches elsewhere can win.
+            # Hard-require the disclosed type word to actually appear (as a
+            # prefix match) in the candidate's own title/categories. Degrades
+            # to the unfiltered pool if that leaves nothing, or if no type
+            # word could be parsed at all. Uses only the single head-noun
+            # token (not every content word) -- OR-ing in color/material
+            # words here would readmit exactly the off-type matches this
+            # gate exists to block (e.g. a heel whose title also says
+            # "satin"). Parsed from the opening message, whose tail names
+            # the category by construction (see buckets.py's module doc).
+            head = head_noun_token(opening_message)
+            if head:
+                relevant = self.retriever.title_relevant_ids({head})
+                gated = [pid for pid in pool if pid in relevant]
+                if gated:
+                    pool = gated
 
         prepared = [
             (norm, toks, 1.0)
