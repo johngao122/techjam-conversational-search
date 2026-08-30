@@ -171,12 +171,18 @@ class Agent:
 
         # -- 3b. Update conversation summary ---------------------------------
         session = self._ledger.read(session_id)
-        current_summary = session.get("conversation_summary", {})
+        current_summary = session.get("conversation_summary", "")
+        # Get last user message
+        history = session.get("history", [])
+        last_msg = ""
+        for msg in reversed(history):
+            if msg.get("role", "user") == "user":
+                last_msg = msg.get("content", "")
+                break
+        
         summary = self._summarizer.summarize(
-            history=session.get("history", []),
-            constraints=session.get("constraints", {}),
-            intent=session.get("intent"),
-            session_summary=current_summary if current_summary else None,
+            last_user_message=last_msg,
+            previous_summary=current_summary or "",
         )
         self._ledger.set_conversation_summary(session_id, summary)
         # Store in cross-session cache keyed by user_id.
@@ -330,19 +336,9 @@ class Agent:
         return constraints
 
     @staticmethod
-    def _build_summary_search_key(summary: dict) -> dict:
-        """Build a search key from the conversation summary using LLM.
-
-        Uses the summary text to create a simple search string like "blue umbrella".
-        """
-        search_key: dict = {}
-        summary_text = summary.get("summary", "")
-
-        # Use LLM to extract the search key string from the summary
-        search_key_string = Agent._extract_search_key_with_llm(summary_text)
-        search_key["_string"] = search_key_string
-
-        return search_key
+    def _build_summary_search_key(summary: str) -> dict:
+        search_key_string = Agent._extract_search_key_with_llm(summary)
+        return {"_string": search_key_string}
 
     @staticmethod
     def _extract_search_key_with_llm(summary_text: str) -> str:

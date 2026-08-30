@@ -29,12 +29,7 @@ def _empty_entry(session_id: str, user_profile: dict) -> dict:
         "soft_preferences": [],
         "asked_attributes": [],
         "search_key": {},
-        "conversation_summary": {
-            "summary": "",
-            "remembered_preferences": {},
-            "topics_covered": [],
-            "last_updated_turn": 0,
-        },
+        "conversation_summary": "",
     }
 
 
@@ -170,17 +165,13 @@ class LedgerService:
         return f"LedgerService(sessions={sessions})"
 
 
-    def set_conversation_summary(self, session_id: str, summary: dict) -> None:
-        """Store or update the conversation summary."""
-        if not isinstance(summary, dict):
-            raise ValueError("summary must be a dict")
+    def set_conversation_summary(self, session_id: str, summary: str) -> None:
         with self._session_lock(session_id):
-            self._store[session_id]["conversation_summary"] = copy.deepcopy(summary)
+            self._store[session_id]["conversation_summary"] = summary
 
-    def get_conversation_summary(self, session_id: str) -> dict:
-        """Retrieve the conversation summary."""
+    def get_conversation_summary(self, session_id: str) -> str:
         with self._session_lock(session_id):
-            return copy.deepcopy(self._store[session_id].get("conversation_summary", {}))
+            return self._store[session_id].get("conversation_summary", "")
 
     # ------------------------------------------------------------------
     # Internal
