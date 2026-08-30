@@ -198,8 +198,10 @@ class Agent:
         query = default_query(constraints, user_message)
 
         # -- 6. Retrieval + Rerank + Decision (never raises) ------------------
+        pref_tags = session.get("user_preference", {}).get("preference_tags", [])
+        rating_style = session.get("user_preference", {}).get("rating_style")
         if self._mode == "legacy":
-            rank_fn = lambda: self._reranker.rank(query, constraints, top_k=top_k)
+            rank_fn = lambda: self._reranker.rank(query, constraints, top_k=top_k, preference_tags=pref_tags, rating_style=rating_style)
         else:
             # Bucket mode ranks against the verbatim constraint memory, not the
             # taxonomy-routed strings -- the disclosed strings are literal
@@ -211,7 +213,7 @@ class Agent:
                 if h.get("role") == "user"
             )
             rank_fn = lambda: self._reranker.rank_bucket(
-                opening, verbatim, top_k=top_k, transcript=transcript
+                opening, verbatim, top_k=top_k, transcript=transcript, preference_tags=pref_tags
             )
         known_attrs = set(session.get("constraints", {}).keys())
         payload, recommendations = safe_decide(
