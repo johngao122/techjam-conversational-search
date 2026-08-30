@@ -21,13 +21,14 @@ Two scoring cores live here:
 from __future__ import annotations
 
 import os
+from collections import OrderedDict
 
 from src.catalog.catalog import Catalog
 from src.catalog.loader import load_catalog_rows
 from src.reranker.coverage import Product, compile_constraints
 from src.retrieval.base import RetrievalRequest
-from src.retrieval.constraint_index import ConstraintIndex
-from src.retrieval.buckets import BucketIndex
+from src.retrieval.buckets import BucketIndex, head_noun_token
+from src.retrieval.constraint_index import ConstraintIndex, is_inert, prepare
 from src.retrieval.retrieval import Retriever
 from src.retrieval.strategies import (
     Bm25Strategy,
@@ -130,6 +131,9 @@ def _rows_to_products(rows: list[tuple]) -> dict[str, Product]:
     return products
 
 
+_BUCKET_CACHE_MAX = 4096
+
+
 class Reranker:
     """Scores an already-retrieved candidate pool into a :class:`RankResult`.
 
@@ -152,12 +156,15 @@ class Reranker:
         # read-only for the duration of a run, so a cache hit is always exactly
         # the value the uncached path would have computed.
         self._product_cache: dict[str, Product] = {}
-
-    # ------------------------------------------------------------------
-    # Retrieval entry points: pick a strategy, then hand its pool to the
-    # matching scorer. Each is intentionally thin so the strategy and the
-    # scorer stay independently swappable (and composable -- see below).
-    # ------------------------------------------------------------------
+        # Per-session resolved bucket key, keyed by opening message. The
+        # coarse category is disclosed once (turn 1) and holds for the whole
+        # session, so resolution is cached rather than re-run every turn.
+        # Bounded: the key is arbitrary user text, one entry per session.
+        self._bucket_cache: OrderedDict[str, tuple[list[str], bool, bool]] = OrderedDict()
+        # Shared fallback pool. Materializing a fresh 50k list per unresolved
+        # session and pinning it in the cache is a lot of memory for a list
+        # nobody mutates.
+        self._all_asins: list[str] | None = None
 
     def rank_bucket(
         self,
@@ -165,6 +172,7 @@ class Reranker:
         constraints: list[str] | None = None,
         top_k: int = 10,
         transcript: str = "",
+        preference_tags: list[str] | None = None,
     ) -> RankResult:
         """Bucket-mode retrieval + verbatim-constraint scoring.
 
@@ -196,6 +204,8 @@ class Reranker:
         constraints: list[str] | None = None,
         top_k: int = 10,
         pool_size: int = DEFAULT_POOL,
+        preference_tags: list[str] | None = None,
+        rating_style: str | None = None,
     ) -> RankResult:
         """Legacy BM25 retrieval + coverage scoring."""
         constraints = constraints or []
@@ -238,6 +248,7 @@ class Reranker:
 
         # Compile each constraint once, then reuse across all candidates.
         matchers = compile_constraints(constraints)
+        pref_matchers = compile_constraints(list(preference_tags or []))
 
         # Score each candidate: coverage, retrieval rank (lower=better), rating.
         # Track max coverage and its crowd in the same scan (no second pass).
@@ -249,7 +260,9 @@ class Reranker:
             if product is None:
                 continue
             cov = sum(1 for m in matchers if m.matches(product))
-            scored.append((cov, retrieval_rank, product))
+            pref_bonus = 0.15 * sum(1 for m in pref_matchers if m.matches(product))
+            score = cov + pref_bonus
+            scored.append((score, retrieval_rank, product))
             if cov > max_coverage:
                 max_coverage = cov
                 top_tier_crowd = 1
@@ -259,13 +272,24 @@ class Reranker:
         if not scored:
             return RankResult()
 
+        # rating_style adjusts how much average_rating vs rating_number (volume)
+        # influences tie-breaking. A "critical" rater deflates scores, making
+        # average_rating noisy -- lean on volume. A "usually positive" rater's
+        # high scores are meaningful -- lean on average_rating.
+        style = (rating_style or "").lower()
+        if "critical" in style:
+            w_rating, w_volume = 0.5, 1.5
+        elif "positive" in style:
+            w_rating, w_volume = 1.5, 0.5
+        else:  # "mixed" or unknown
+            w_rating, w_volume = 1.0, 1.0
+
         # Rerank: coverage desc, retrieval rank asc, rating desc, id asc (stable).
         scored.sort(
             key=lambda s: (
                 -s[0],
                 s[1],
-                -s[2].rating_number,
-                -s[2].average_rating,
+                -(w_volume * s[2].rating_number + w_rating * s[2].average_rating * 1000),
                 s[2].parent_asin,
             )
         )

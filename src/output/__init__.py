@@ -14,6 +14,7 @@ Every ``respond`` turn must return a dict with exactly these keys (see
 hand-builds the contract inline.
 """
 
+from src.output.followup import FollowUpContext
 from src.output.formatter import OutputFormatter
 
-__all__ = ["OutputFormatter"]
+__all__ = ["OutputFormatter", "FollowUpContext"]
