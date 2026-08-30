@@ -25,6 +25,7 @@ from src.confidence.policy import DEFAULT_THETA, exposure
 from src.intent_router import build_search_key, detect_scenario, extract_attributes
 from src.intent_router.constraint_memory import ConstraintMemory
 from src.ledger.ledger import LedgerService
+from src.ledger.llm_summarizer import LLMSummarizer
 from src.output import OutputFormatter
 from src.reranker import build_reranker, default_query
 from src.reranker.rank import retrieval_mode
@@ -100,12 +101,20 @@ class Agent:
         self._openings: dict[str, str] = {}
         # Cumulative verbatim constraint memory (evict-on-value-conflict).
         self._memory: dict[str, ConstraintMemory] = {}
+        # LLM-based conversation summarizer.
+        self._summarizer = LLMSummarizer()
+        # Cross-session summary storage: keyed by user_id from user_profile.
+        self._summaries: dict[str, dict] = {}
 
     def reset(self, session_id: str, user_profile: dict) -> None:
         self._ledger.create(session_id, user_profile or {})
         self._sessions[session_id] = SessionLedger(session_id=session_id)
         self._openings.pop(session_id, None)
         self._memory[session_id] = ConstraintMemory()
+        # Inject prior summary if this user_id has been seen before.
+        user_id = (user_profile or {}).get("user_id")
+        if user_id and user_id in self._summaries:
+            self._ledger.set_conversation_summary(session_id, self._summaries[user_id])
 
     def respond(
         self,
@@ -159,6 +168,19 @@ class Agent:
             s.setdefault("history", []).append(
                 {"turn": turn, "role": "user", "content": user_message}
             )
+
+        # -- 3b. Update conversation summary ---------------------------------
+        session = self._ledger.read(session_id)
+        summary = self._summarizer.summarize(
+            history=session.get("history", []),
+            constraints=session.get("constraints", {}),
+            intent=session.get("intent"),
+        )
+        self._ledger.set_conversation_summary(session_id, summary)
+        # Store in cross-session cache keyed by user_id.
+        user_id = session.get("user_profile", {}).get("user_id")
+        if user_id:
+            self._summaries[user_id] = summary
 
         # -- 4. Update confidence ledger --------------------------------------
         # observe() reads the raw reply for override / boundary / exhaustion.
