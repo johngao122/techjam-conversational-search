@@ -35,7 +35,7 @@ class LLMSummarizer:
             return
 
         base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-        model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+        model = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
 
         try:
             from openai import OpenAI  # noqa: PLC0415
