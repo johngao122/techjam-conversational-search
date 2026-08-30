@@ -35,6 +35,7 @@ from src.retrieval.strategies import (
     BucketStrategy,
     ConstraintStrategy,
     DEFAULT_POOL,
+    PreparedConstraints,
 )
 from src.reranker.types import RankResult
 
@@ -152,6 +153,12 @@ class Reranker:
         # the value the uncached path would have computed.
         self._product_cache: dict[str, Product] = {}
 
+    # ------------------------------------------------------------------
+    # Retrieval entry points: pick a strategy, then hand its pool to the
+    # matching scorer. Each is intentionally thin so the strategy and the
+    # scorer stay independently swappable (and composable -- see below).
+    # ------------------------------------------------------------------
+
     def rank_bucket(
         self,
         opening_message: str,
@@ -159,12 +166,12 @@ class Reranker:
         top_k: int = 10,
         transcript: str = "",
     ) -> RankResult:
-        """Verbatim-constraint scoring of the bucket-mode candidate pool.
+        """Bucket-mode retrieval + verbatim-constraint scoring.
 
         The candidate pool -- resolved bucket, whole-catalog BM25 fallback, and
         the paraphrase-insurance token scoring -- is produced by the injected
-        :class:`~src.retrieval.strategies.BucketPipeline`. This method only
-        computes the coverage internals the confidence gate reads.
+        :class:`~src.retrieval.strategies.BucketPipeline`; the pool is then
+        scored by :meth:`score_by_constraints`.
         """
         if self._bucket_pipeline is None or self._constraint is None:
             return RankResult()
@@ -177,26 +184,10 @@ class Reranker:
             top_k=top_k,
         )
         result = self._bucket_pipeline.candidates(request)
-        ranked = result.candidates
-        if not ranked:
-            return RankResult()
-
-        prepared = self._bucket_pipeline.last_prepared
-        # max_coverage / crowd are advisory internals for the confidence gate;
-        # in bucket mode the exposure gate is turn-based, so a coarse count of
-        # constraints that landed a nonzero score on the top candidate suffices.
-        max_cov = 0
-        if prepared:
-            best = ranked[0]
-            max_cov = sum(
-                1 for norm, toks, w in prepared
-                if self._constraint.score(best, [(norm, toks, w)]) > 0.0
-            )
-        return RankResult(
-            ranked=ranked,
+        return self.score_by_constraints(
+            result.candidates,
+            self._bucket_pipeline.last_prepared,
             pool_size=self._bucket_pipeline.last_pool_size,
-            max_coverage=max_cov,
-            top_tier_crowd=1,
         )
 
     def rank(
@@ -206,11 +197,40 @@ class Reranker:
         top_k: int = 10,
         pool_size: int = DEFAULT_POOL,
     ) -> RankResult:
+        """Legacy BM25 retrieval + coverage scoring."""
         constraints = constraints or []
         if self._bm25 is None:
             return RankResult()
 
-        candidate_ids = self._bm25.search(query, pool_size)
+        # Consume the uniform retrieval boundary: hand the strategy a request
+        # (pre-composed query for the legacy path) and read back a result.
+        request = RetrievalRequest(
+            constraints=constraints,
+            query=query,
+            top_k=top_k,
+            pool_size=pool_size,
+        )
+        candidate_ids = self._bm25.candidates(request).candidates
+        return self.score_by_coverage(candidate_ids, constraints, top_k=top_k)
+
+    # ------------------------------------------------------------------
+    # Scoring cores: pure functions of a candidate pool. They take an
+    # already-produced pool (from any strategy, or a merged pool from several)
+    # so future combined pipelines can retrieve from N methods and reuse these.
+    # ------------------------------------------------------------------
+
+    def score_by_coverage(
+        self,
+        candidate_ids: list[str],
+        constraints: list[str],
+        top_k: int = 10,
+    ) -> RankResult:
+        """Coverage scoring: order by (coverage, retrieval rank, rating).
+
+        ``candidate_ids`` is any ordered pool of ``parent_asin`` -- its order is
+        used as the retrieval-rank tiebreak, so a merged multi-strategy pool
+        works here unchanged.
+        """
         if not candidate_ids:
             return RankResult()
 
@@ -257,6 +277,38 @@ class Reranker:
             pool_size=len(scored),
             max_coverage=max_coverage,
             top_tier_crowd=top_tier_crowd,
+        )
+
+    def score_by_constraints(
+        self,
+        ranked: list[str],
+        prepared: PreparedConstraints,
+        pool_size: int,
+    ) -> RankResult:
+        """Verbatim-constraint coverage over an already-ranked pool.
+
+        ``ranked`` is expected pre-ordered by the constraint index (score, then
+        popularity); this only computes the advisory ``max_coverage`` the
+        confidence gate reads. ``pool_size`` is the pre-truncation pool size.
+        """
+        if self._constraint is None or not ranked:
+            return RankResult()
+
+        # max_coverage / crowd are advisory internals for the confidence gate;
+        # in bucket mode the exposure gate is turn-based, so a coarse count of
+        # constraints that landed a nonzero score on the top candidate suffices.
+        max_cov = 0
+        if prepared:
+            best = ranked[0]
+            max_cov = sum(
+                1 for norm, toks, w in prepared
+                if self._constraint.score(best, [(norm, toks, w)]) > 0.0
+            )
+        return RankResult(
+            ranked=ranked,
+            pool_size=pool_size,
+            max_coverage=max_cov,
+            top_tier_crowd=1,
         )
 
 

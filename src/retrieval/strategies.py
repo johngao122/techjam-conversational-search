@@ -55,8 +55,14 @@ class Bm25Strategy:
         return hit
 
     def candidates(self, request: RetrievalRequest) -> RetrievalResult:
-        query = " ".join([*request.constraints, request.transcript]).strip()
-        pool = self.search(query, self._pool_size)
+        # A pre-composed query (legacy path) is used verbatim; otherwise compose
+        # one from the disclosed constraints plus the running transcript.
+        if request.query is not None:
+            query = request.query
+        else:
+            query = " ".join([*request.constraints, request.transcript]).strip()
+        top_k = request.pool_size or self._pool_size
+        pool = self.search(query, top_k)
         return RetrievalResult(candidates=pool, how="bm25")
 
 

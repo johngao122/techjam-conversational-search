@@ -28,13 +28,20 @@ class RetrievalRequest:
             the target's metadata).
         transcript: Accumulated user turns, used by the BM25 fallback rung when
             the category fails to resolve.
+        query: Pre-composed retrieval query. When set, a text strategy uses it
+            verbatim instead of composing one from ``constraints``/``transcript``
+            (the legacy BM25 path hands in an already-built query string).
         top_k: Number of ranked candidates the caller ultimately wants.
+        pool_size: Candidate-pool size a strategy should retrieve before the
+            reranker scores/truncates. Defaults to ``top_k`` when unset (0).
     """
 
     opening_message: str = ""
     constraints: list[str] = field(default_factory=list)
     transcript: str = ""
+    query: str | None = None
     top_k: int = 10
+    pool_size: int = 0
 
 
 @dataclass(frozen=True)
