@@ -62,19 +62,18 @@ class LLMSummarizer:
                 "last_updated_turn": 0,
             }
 
-        # Extract from last message
+        # Use ONLY the last message (current intent)
         last_msg = history[-1].get("content", "") if history else ""
-        all_msgs = " ".join([h.get("content", "") for h in history])
         
-        # Extract preferences from constraints
+        # Extract preferences from constraints (these are the current/updated values)
         prefs = {}
         for key, values in constraints.items():
             if values:
                 prefs[key] = values[0]
         
-        # Use the conversation directly as summary (Gemini keeps truncating)
-        summary = self._build_summary(all_msgs, prefs)
-        topics = self._extract_topics(all_msgs, prefs)
+        # Build summary from last message only
+        summary = self._build_summary(last_msg, prefs)
+        topics = self._extract_topics(last_msg, prefs)
 
         return {
             "summary": summary,
@@ -83,14 +82,14 @@ class LLMSummarizer:
             "last_updated_turn": len(history),
         }
 
-    def _build_summary(self, conversation: str, prefs: dict[str, str]) -> str:
-        """Build summary from conversation and preferences."""
-        if not conversation:
+    def _build_summary(self, last_message: str, prefs: dict[str, str]) -> str:
+        """Build summary from the latest message and current preferences."""
+        if not last_message:
             return ""
         
-        # Build a concise summary
+        # Build a concise summary from ONLY the last message
         prefs_str = ", ".join([f"{k}: {v}" for k, v in prefs.items()])
-        return f"Customer wants: {conversation[:80]} ({prefs_str})"
+        return f"Customer wants: {last_message} ({prefs_str})"
 
     def _extract_topics(self, message: str, prefs: dict[str, str]) -> list[str]:
         """Extract topics from message and preferences."""
