@@ -23,10 +23,18 @@ Field values are auto-classified by shape:
 
 from __future__ import annotations
 
+import logging
 import re
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..catalog import Catalog
 from ..catalog.catalog import TABLE_NAME, TEXT_COLUMNS as _TEXT_COLUMNS
+
+if TYPE_CHECKING:
+    from ..embeddings import EmbeddingClient, VectorIndex
+
+logger = logging.getLogger(__name__)
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -109,10 +117,64 @@ class Retriever:
         catalog: Catalog,
         weights: dict[str, float] | None = None,
         field_map: dict[str, tuple[str, ...]] | None = None,
+        vector_index: "VectorIndex | None" = None,
+        embedding_client: "EmbeddingClient | None" = None,
     ) -> None:
         self.catalog = catalog
         self.weights = {**_DEFAULT_WEIGHTS, **(weights or {})}
         self.field_map = {**_DEFAULT_FIELD_MAP, **(field_map or {})}
+        self.vector_index = vector_index
+        self.embedding_client = embedding_client
+
+    @classmethod
+    def with_vectors(
+        cls,
+        catalog: Catalog,
+        cache_path: "str | Path" = None,  # type: ignore[assignment]
+        weights: dict[str, float] | None = None,
+        field_map: dict[str, tuple[str, ...]] | None = None,
+    ) -> "Retriever":
+        """Build a retriever with semantic search enabled *if possible*.
+
+        Loads the on-disk embedding cache into a :class:`VectorIndex` and
+        constructs an :class:`EmbeddingClient` for query embedding. If numpy /
+        the cache / the endpoint are unavailable, the vector layer is simply
+        left disabled and the retriever behaves exactly like a BM25-only one --
+        :meth:`retrieve_vector` then returns ``[]``.
+        """
+        vector_index = None
+        embedding_client = None
+        try:
+            from ..embeddings import DEFAULT_CACHE_PATH, EmbeddingClient, VectorIndex
+
+            path = cache_path if cache_path is not None else DEFAULT_CACHE_PATH
+            vector_index = VectorIndex.load(path)
+            if vector_index is None:
+                logger.info("No embedding cache at %s; vector retrieval disabled.", path)
+            else:
+                embedding_client = EmbeddingClient()
+                if not embedding_client.available:
+                    logger.info(
+                        "Embedding client unavailable (%s); vector retrieval disabled.",
+                        embedding_client.init_error,
+                    )
+                    embedding_client = None
+                    vector_index = None
+        except ImportError as exc:
+            logger.info("numpy/embeddings unavailable (%s); vector retrieval disabled.", exc)
+
+        return cls(
+            catalog,
+            weights=weights,
+            field_map=field_map,
+            vector_index=vector_index,
+            embedding_client=embedding_client,
+        )
+
+    @property
+    def has_vectors(self) -> bool:
+        """True when semantic retrieval is wired up and usable."""
+        return self.vector_index is not None and self.embedding_client is not None
 
     # ------------------------------------------------------------------
     # Retrieval
@@ -156,6 +218,31 @@ class Retriever:
 
         rows = self.catalog.execute(sql, params)
         return [str(row[0]) for row in rows]
+
+    def retrieve_vector(self, query_text: str, top_k: int = 10) -> list[str]:
+        """Return up to ``top_k`` ``parent_asin`` strings ranked by semantic
+        (cosine) similarity between ``query_text`` and each product's embedding.
+
+        This is a standalone semantic path, independent of BM25: it embeds the
+        raw query string and searches the in-memory vector index. Returns an
+        empty list when the vector layer is unavailable (no cache / no numpy /
+        no endpoint) or when embedding the query fails, so callers can fall
+        back to :meth:`retrieve_bm25`.
+        """
+        if not self.has_vectors:
+            return []
+        query_text = (query_text or "").strip()
+        if not query_text:
+            return []
+
+        try:
+            query_vector = self.embedding_client.embed_one(query_text)
+        except Exception as exc:  # noqa: BLE001 - never break retrieval on embed failure
+            logger.warning("Query embedding failed; returning no vector results: %s", exc)
+            return []
+
+        hits = self.vector_index.search(query_vector, top_k=top_k)
+        return [asin for asin, _score in hits]
 
     # ------------------------------------------------------------------
     # Helpers

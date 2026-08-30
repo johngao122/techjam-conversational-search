@@ -28,6 +28,7 @@ from src.ledger.ledger import LedgerService
 from src.output import OutputFormatter
 from src.reranker import build_reranker, default_query
 from src.reranker.rank import retrieval_mode
+from src.retrieval.retrieval import Retriever
 
 
 @dataclass
@@ -85,6 +86,11 @@ class Agent:
         self._formatter = OutputFormatter()
         # Eager build: FTS5 index + catalog load happen once, up front.
         self._reranker = build_reranker(self._catalog_path)
+        # Vector-capable retriever sharing the reranker's already-built in-memory
+        # catalog (no second load). Enables BM25 + semantic retrieval as two
+        # independent parallel sources; retrieve_vector degrades to [] when the
+        # embedding cache / endpoint / numpy are unavailable.
+        self._retriever = Retriever.with_vectors(self._reranker.catalog)
         self._popularity = popularity_top10(self._catalog_path)
         self._mode = retrieval_mode()
         # Confidence state, keyed by session_id (parallel to the structured ledger).
@@ -173,13 +179,28 @@ class Agent:
             conf_ledger.reset_progress()
 
         # -- 5. Build search key + query --------------------------------------
+        # Union-join this turn's parser-derived key with the previous turn's so
+        # the key is monotonic across turns: text attributes accumulate (union),
+        # numeric range filters (price/rating) are updated to the latest value.
         session = self._ledger.read(session_id)
-        if session.get("search_key"):
-            search_key = session["search_key"]
-        else:
-            search_key = build_search_key(session)
-            self._ledger.set_search_key(session_id, search_key)
+        current_key = build_search_key(session)
+        previous_key = session.get("search_key") or {}
+        search_key = self._union_search_key(previous_key, current_key)
+        self._ledger.set_search_key(session_id, search_key)
         query = default_query(constraints, user_message)
+
+        # -- 5b. Parallel retrieval sources (independent; NOT fallbacks) ------
+        # Both run every turn. Results are intentionally left UNUSED for now --
+        # this wires the parallel paths so they execute and are ready for a
+        # future fusion/rerank step. The bucket pipeline below still drives the
+        # emitted top-10 (unchanged behaviour). Note the rank_bucket rung-3 BM25
+        # fallback is deliberately not relied upon; this is the first-class BM25.
+        bm25_results = self._retriever.retrieve_bm25(search_key, top_k=top_k)
+        # TODO: add a query-processing function here to turn the session/user
+        # message into an optimal vector query string; for now pass the raw
+        # user message straight through.
+        vector_results = self._retriever.retrieve_vector(user_message, top_k=top_k)
+        # del bm25_results, vector_results  # intentionally unused for now
 
         # -- 6. Retrieval + Rerank + Decision (never raises) ------------------
         if self._mode == "legacy":
@@ -204,6 +225,8 @@ class Agent:
             theta=self._theta,
             policy="always_ask",
         )
+        recommendations = bm25_results
+        # recommendations = vector_results
         if payload.ask_attribute:
             conf_ledger.note_ask(payload.ask_attribute)
 
@@ -220,6 +243,45 @@ class Agent:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _union_search_key(previous: dict[str, list], current: dict[str, list]) -> dict[str, list]:
+        """Merge the previous turn's search key with the current one.
+
+        Text fields (list-of-strings) are *unioned* -- values accumulate across
+        turns, de-duplicated, preserving first-seen order. Numeric range filters
+        (``price``/``rating`` etc., list-of-``{op: value}``) are *updated*: the
+        current turn's value replaces the previous one (latest budget wins),
+        rather than unioning bounds which could impose contradictory limits.
+
+        The result is monotonic for text (never loses a previously-known value)
+        while staying correct for numeric constraints.
+        """
+        # Local import: reuse the retriever's numeric-shape classifier so this
+        # stays in lock-step with how retrieve_bm25 interprets the key.
+        from src.retrieval.retrieval import _is_numeric_filter
+
+        merged: dict[str, list] = {}
+        for field in (*previous.keys(), *current.keys()):
+            if field in merged:
+                continue
+            cur_val = current.get(field)
+            prev_val = previous.get(field)
+
+            # Numeric range filter -> update to current if present, else keep prev.
+            if _is_numeric_filter(cur_val) or _is_numeric_filter(prev_val):
+                merged[field] = cur_val if cur_val is not None else prev_val
+                continue
+
+            # Text field -> union of value lists, de-duplicated, order-preserving.
+            values: list = []
+            for source in (prev_val, cur_val):
+                if isinstance(source, list):
+                    for v in source:
+                        if v not in values:
+                            values.append(v)
+            merged[field] = values
+        return merged
 
     @staticmethod
     def _collect_constraints(session: dict, exclude_attrs: set[str] | None = None) -> list[str]:

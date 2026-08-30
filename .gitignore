@@ -1,10 +1,14 @@
 __pycache__/
+.vscode/
 *.py[cod]
 .DS_Store
 .env
 results.json
 data/catalog.jsonl
 data/releases/
+# Cached product embeddings (rebuild with scripts/build_embeddings.py).
+data/embeddings.npz
+data/embeddings.npz.meta.json
 # Organizer-only code, private evaluation data, manifests, and build reports.
 organizer/
 secure/
