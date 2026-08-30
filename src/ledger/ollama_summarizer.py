@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -33,99 +32,54 @@ class OllamaSummarizer:
 
     def summarize(
         self,
-        history: list[dict[str, str]],
-        constraints: dict[str, list[str]],
-        intent: str | None,
-        session_summary: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Summarize conversation history into a structured summary."""
-        if not history:
-            return {
-                "summary": "",
-                "remembered_preferences": {},
-                "topics_covered": [],
-                "last_updated_turn": 0,
-            }
+        last_user_message: str,
+        previous_summary: str = "",
+    ) -> str:
+        """Summarize what the customer wants based on their latest message and previous context."""
+        if not last_user_message or not self._client:
+            return self._polish_message(last_user_message)
 
-        # Extract current preferences
-        prefs = {}
-        for key, values in constraints.items():
-            if values:
-                prefs[key] = values[0]
+        return self._generate_summary(last_user_message, previous_summary)
 
-        # Generate new summary
-        summary = self._generate_summary(history, prefs)
-
-        # Extract topics
-        last_msg = history[-1].get("content", "") if history else ""
-        topics = self._extract_topics(last_msg, prefs)
-
-        return {
-            "summary": summary,
-            "remembered_preferences": prefs,
-            "topics_covered": topics,
-            "last_updated_turn": len(history),
-        }
-
-    def _generate_summary(self, history: list[dict[str, str]], prefs: dict[str, str]) -> str:
+    def _generate_summary(self, last_msg: str, previous_summary: str = "") -> str:
         """Generate a summary using local Ollama model."""
-        if not history or not self._client:
-            return self._polish_message(history[-1].get("content", "") if history else "")
+        if not last_msg or not self._client:
+            return self._polish_message(last_msg)
 
-        # Build conversation transcript
-        transcript = "\n".join([
-            f"{msg.get('role', 'user').upper()}: {msg.get('content', '')}"
-            for msg in history
-        ])
+        prompt = f"""Write what the customer currently wants in ONE sentence.
 
-        # Build preference context
-        prefs_text = ", ".join([f"{k}: {v}" for k, v in prefs.items() if v])
+PREVIOUS REQUEST: {previous_summary if previous_summary else "none"}
+NEW MESSAGE: "{last_msg}"
 
-        prompt = f"""You are a shopping assistant. Write a summary of what the customer currently wants.
-
-CONVERSATION HISTORY:
-{transcript}
-
-CURRENT PREFERENCES: {prefs_text if prefs_text else '(none)'}
-
-Write ONE short sentence showing the CURRENT/FINAL state only:
-- What product they want
-- Key attributes (color, flavor, size, etc) if mentioned
-
-Do NOT include history or evolution—just the final state.
+Extract ONLY what they want NOW (the latest stated request):
+- If message has "nevermind": extract the NEW request, ignore previous
+- If message is vague ("show me", "pink ones"): apply to previous product
+- Format: "Customer wants [product] [attributes]"
 
 Examples:
-- "Customer wants BBQ-flavored chicken drumlets"
-- "Customer wants blue boots"
-- "Customer wants an iPhone from Apple"
+- New="shopping carts" → "Customer wants to see shopping carts"
+- Previous="carts", New="show me pink ones" → "Customer wants pink shopping carts"
 
-Write ONLY the summary sentence based on what was actually said:"""
+Output ONLY one sentence:"""
 
         try:
             response = self._client.generate(
                 model=self._model,
                 prompt=prompt,
                 stream=False,
-                options={
-                    "temperature": 0.1,
-                    "num_predict": 100,
-                    "top_k": 20,
-                    "top_p": 0.9,
-                }
+                options={"temperature": 0.1, "top_k": 20}
             )
             summary = (response.get("response", "") or "").strip()
 
             if summary and len(summary.split()) >= 3 and summary[0].isalpha():
-                # Ensure period at end
                 if not summary.endswith("."):
                     summary = summary + "."
 
                 print(f"  ✓ Ollama ({self._model}) generated summary")
                 return summary
 
-            # Fallback: polish the last message
             print(f"  ⚠ Ollama response invalid, using fallback")
-            return self._polish_message(history[-1].get("content", ""))
+            return self._polish_message(last_msg)
 
         except Exception as exc:
             error_msg = str(exc)
@@ -134,8 +88,7 @@ Write ONLY the summary sentence based on what was actually said:"""
             else:
                 print(f"  ✗ Ollama error: {type(exc).__name__}")
             logger.debug("Ollama summary generation failed: %s", exc)
-            # Graceful fallback: polish the last message
-            return self._polish_message(history[-1].get("content", ""))
+            return self._polish_message(last_msg)
 
     def _polish_message(self, message: str) -> str:
         """Polish message: fix typos, capitalize, clean whitespace."""
@@ -151,20 +104,3 @@ Write ONLY the summary sentence based on what was actually said:"""
 
         return message
 
-    def _extract_topics(self, message: str, prefs: dict[str, str]) -> list[str]:
-        """Extract topics from message and preferences."""
-        topics = []
-        keywords = [
-            "boots", "shoes", "leather", "suede", "color", "size", "budget",
-            "material", "style", "comfort", "umbrellas", "umbrella", "furry",
-            "tvs", "tv", "sony", "samsung", "lg", "red", "blue", "black", "white",
-            "men", "women", "kids", "sports", "casual", "formal"
-        ]
-
-        msg_lower = message.lower()
-        for kw in keywords:
-            if kw in msg_lower or kw in str(prefs).lower():
-                if kw not in topics:
-                    topics.append(kw)
-
-        return topics
