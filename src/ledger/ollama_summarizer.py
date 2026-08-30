@@ -56,14 +56,10 @@ class OllamaSummarizer:
         # Generate new summary
         summary = self._generate_summary(history, prefs)
 
-        # Extract topics
-        last_msg = history[-1].get("content", "") if history else ""
-        topics = self._extract_topics(last_msg, prefs)
-
         return {
             "summary": summary,
             "remembered_preferences": prefs,
-            "topics_covered": topics,
+            "topics_covered": [],
             "last_updated_turn": len(history),
         }
 
@@ -150,21 +146,3 @@ Write ONLY the summary sentence based on what was actually said:"""
             message = message[0].upper() + message[1:]
 
         return message
-
-    def _extract_topics(self, message: str, prefs: dict[str, str]) -> list[str]:
-        """Extract topics from message and preferences."""
-        topics = []
-        keywords = [
-            "boots", "shoes", "leather", "suede", "color", "size", "budget",
-            "material", "style", "comfort", "umbrellas", "umbrella", "furry",
-            "tvs", "tv", "sony", "samsung", "lg", "red", "blue", "black", "white",
-            "men", "women", "kids", "sports", "casual", "formal"
-        ]
-
-        msg_lower = message.lower()
-        for kw in keywords:
-            if kw in msg_lower or kw in str(prefs).lower():
-                if kw not in topics:
-                    topics.append(kw)
-
-        return topics
