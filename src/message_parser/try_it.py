@@ -41,19 +41,24 @@ def main() -> None:
     print("TESTING WITH CONVERSATION SUMMARIZATION")
     print("=" * 70)
     print()
-    
+
     from src.agent import Agent
-    from src.ledger.llm_summarizer import LLMSummarizer
-    
+
     agent = Agent()
     summarizer = agent._summarizer
-    
-    if not summarizer._client:
-        print("⚠️  Gemini client not initialized. Check GEMINI_API_KEY env var.")
-        print("Message parsing will still work.\n")
-    else:
-        print("✓ Gemini summarizer initialized")
+
+    # Check which summarizer is being used
+    summarizer_type = type(summarizer).__name__
+    if summarizer_type == "OllamaSummarizer":
+        print(f"✓ {summarizer_type} initialized")
         print(f"  Model: {summarizer._model}\n")
+    elif hasattr(summarizer, '_client') and summarizer._client:
+        print(f"✓ {summarizer_type} initialized")
+        if hasattr(summarizer, '_model'):
+            print(f"  Model: {summarizer._model}\n")
+    else:
+        print(f"⚠️  {summarizer_type} not initialized (will use fallback).")
+        print("Message parsing will still work.\n")
 
     # Conversation history tracking
     session_id = "test_session"
@@ -94,12 +99,17 @@ def main() -> None:
             intent=ledger.get("intent"),
         )
         agent._ledger.set_conversation_summary(session_id, summary)
-        
+
+        # Update search key from summary
+        search_key = agent._build_summary_search_key(summary)
+        agent._ledger.set_search_key(session_id, search_key)
+
         print(f"Summary: {summary.get('summary', '(not yet)') or '(not yet)'}")
         if summary.get('remembered_preferences'):
             print(f"Preferences: {json.dumps(summary.get('remembered_preferences', {}))}")
+        print(f"Search Key: '{search_key.get('_string', '')}'")
         print()
-        
+
         turn += 1
 
 

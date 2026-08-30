@@ -25,7 +25,7 @@ from src.confidence.policy import DEFAULT_THETA, exposure
 from src.intent_router import build_search_key, detect_scenario, extract_attributes
 from src.intent_router.constraint_memory import ConstraintMemory
 from src.ledger.ledger import LedgerService
-from src.ledger.llm_summarizer import LLMSummarizer
+from src.ledger.ollama_summarizer import OllamaSummarizer
 from src.output import OutputFormatter
 from src.reranker import build_reranker, default_query
 from src.reranker.rank import retrieval_mode
@@ -101,8 +101,8 @@ class Agent:
         self._openings: dict[str, str] = {}
         # Cumulative verbatim constraint memory (evict-on-value-conflict).
         self._memory: dict[str, ConstraintMemory] = {}
-        # LLM-based conversation summarizer.
-        self._summarizer = LLMSummarizer()
+        # LLM-based conversation summarizer using local Ollama (phi3:mini)
+        self._summarizer = OllamaSummarizer(model="phi3:mini")
         # Cross-session summary storage: keyed by user_id from user_profile.
         self._summaries: dict[str, dict] = {}
 
@@ -171,16 +171,22 @@ class Agent:
 
         # -- 3b. Update conversation summary ---------------------------------
         session = self._ledger.read(session_id)
+        current_summary = session.get("conversation_summary", {})
         summary = self._summarizer.summarize(
             history=session.get("history", []),
             constraints=session.get("constraints", {}),
             intent=session.get("intent"),
+            session_summary=current_summary if current_summary else None,
         )
         self._ledger.set_conversation_summary(session_id, summary)
         # Store in cross-session cache keyed by user_id.
         user_id = session.get("user_profile", {}).get("user_id")
         if user_id:
             self._summaries[user_id] = summary
+
+        # -- 3c. Update search key from summary --------------------------------
+        summary_search_key = self._build_summary_search_key(summary)
+        self._ledger.set_search_key(session_id, summary_search_key)
 
         # -- 4. Update confidence ledger --------------------------------------
         # observe() reads the raw reply for override / boundary / exhaustion.
@@ -322,3 +328,108 @@ class Agent:
         if price_c:
             constraints.append(f"budget around ${price_c['amount']}")
         return constraints
+
+    @staticmethod
+    def _build_summary_search_key(summary: dict) -> dict:
+        """Build a search key from the conversation summary using LLM.
+
+        Uses the summary text to create a simple search string like "blue umbrella".
+        """
+        search_key: dict = {}
+        summary_text = summary.get("summary", "")
+
+        # Use LLM to extract the search key string from the summary
+        search_key_string = Agent._extract_search_key_with_llm(summary_text)
+        search_key["_string"] = search_key_string
+
+        return search_key
+
+    @staticmethod
+    def _extract_search_key_with_llm(summary_text: str) -> str:
+        """Use LLM to extract a simple search string from the summary.
+
+        Returns something like "blue umbrella" or "red leather boots".
+        """
+        try:
+            import ollama
+
+            prompt = f"""Extract a simple search string from this customer summary.
+
+Summary: {summary_text}
+
+Return ONLY a simple search string with attributes and product, like:
+- "blue umbrella"
+- "red boots"
+- "leather shoes"
+- "black iphone"
+
+Do NOT include extra words or explanations. Just the search string:"""
+
+            response = ollama.generate(
+                model="phi3:mini",
+                prompt=prompt,
+                stream=False,
+                options={"temperature": 0.1, "num_predict": 30}
+            )
+
+            search_string = (response.get("response", "") or "").strip()
+
+            # Clean up - remove quotes and extra punctuation
+            search_string = search_string.strip("\"'.")
+
+            if search_string:
+                return search_string
+            else:
+                return summary_text  # Fallback to summary if extraction fails
+
+        except Exception as e:
+            # Fallback: just return the summary text
+            return summary_text
+
+    @staticmethod
+    def _extract_product_from_summary(summary_text: str) -> str | None:
+        """Extract the main product/item the customer wants from summary text.
+
+        Uses simple keyword matching to identify product names.
+        """
+        if not summary_text:
+            return None
+
+        # Common product keywords and their canonical forms
+        product_keywords = {
+            "boots": "boots",
+            "shoes": "shoes",
+            "umbrella": "umbrella",
+            "umbrellas": "umbrella",
+            "phone": "phone",
+            "iphone": "iphone",
+            "tv": "tv",
+            "television": "tv",
+            "shirt": "shirt",
+            "pants": "pants",
+            "jacket": "jacket",
+            "coat": "coat",
+            "dress": "dress",
+            "skirt": "skirt",
+            "sweater": "sweater",
+            "shirt": "shirt",
+            "hat": "hat",
+            "cap": "cap",
+            "bag": "bag",
+            "purse": "purse",
+            "wallet": "wallet",
+            "watch": "watch",
+            "glasses": "glasses",
+            "sunglasses": "sunglasses",
+            "belt": "belt",
+            "scarf": "scarf",
+            "gloves": "gloves",
+            "socks": "socks",
+            "lingerie": "lingerie",
+        }
+
+        for keyword, product in product_keywords.items():
+            if keyword in summary_text:
+                return product
+
+        return None
