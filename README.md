@@ -40,11 +40,34 @@ Python 3.10 or later is recommended. The starter uses only the Python standard l
 python3 -m evaluator.local_evaluator
 ```
 
-Edit `starter/agent.py` to implement your system. Do not edit the evaluator or public labels when reporting your local score.
+Edit `src/agent.py` to implement your system. Do not edit the evaluator or public labels when reporting your local score.
 The command writes per-session results and aggregate metrics to `results.json`.
 
 The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
 MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
+
+## Try the Interactive Parser
+
+Test message parsing and conversation summarization interactively:
+
+```bash
+# Terminal 1: Start Ollama (serves local LLM)
+ollama serve
+
+# Terminal 2: Run the interactive parser
+./run.sh try
+```
+
+**Setup (one-time):**
+```bash
+ollama pull phi3:mini    # Download 2.3GB model
+pip install ollama       # Install Python client
+```
+
+The parser uses a local `phi3:mini` model for intelligent conversation summaries—no API rate limits or costs. Type messages to see:
+- Attribute extraction (category, color, size, brand, etc)
+- Real-time conversation summarization
+- Intent detection (buying, browsing, override, boundary)
 
 ## Agent Interface
 

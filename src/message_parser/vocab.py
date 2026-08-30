@@ -124,7 +124,7 @@ NEGATION_WINDOW = 30
 OVERRIDE_PATTERNS = (
     "actually", "instead", "ignore my earlier", "ignore that", "scratch that",
     "change of mind", "changed my mind", "on second thought", "never mind that",
-    "forget what i said", "rather than that", "let's go with", "lets go with",
+    "nevermind", "forget what i said", "rather than that", "let's go with", "lets go with",
 )
 NO_PREFERENCE_PATTERNS = (
     "don't have a preference", "do not have a preference", "no preference",
