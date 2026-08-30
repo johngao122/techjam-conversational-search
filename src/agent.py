@@ -192,7 +192,7 @@ class Agent:
 
         # -- 3c. Update search key from summary --------------------------------
         summary_search_key = self._build_summary_search_key(summary)
-        self._ledger.set_search_key(session_id, summary_search_key)
+        self._ledger.set_llm_search_key(session_id, summary_search_key)
 
         # -- 4. Update confidence ledger --------------------------------------
         # observe() reads the raw reply for override / boundary / exhaustion.
@@ -230,10 +230,9 @@ class Agent:
         # emitted top-10 (unchanged behaviour). Note the rank_bucket rung-3 BM25
         # fallback is deliberately not relied upon; this is the first-class BM25.
         bm25_results = self._retriever.retrieve_bm25(search_key, top_k=top_k)
-        # TODO: add a query-processing function here to turn the session/user
-        # message into an optimal vector query string; for now pass the raw
-        # user message straight through.
-        vector_results = self._retriever.retrieve_vector(user_message, top_k=top_k)
+        llm_search_key = session.get("llm_search_key") or {}
+        vector_query = llm_search_key.get("_string")
+        vector_results = self._retriever.retrieve_vector(vector_query, top_k=top_k)
         # del bm25_results, vector_results  # intentionally unused for now
 
         # -- 6. Retrieval + Rerank + Decision (never raises) ------------------
@@ -259,8 +258,8 @@ class Agent:
             theta=self._theta,
             policy="always_ask",
         )
-        recommendations = bm25_results
-        # recommendations = vector_results
+        # recommendations = bm25_results
+        recommendations = vector_results
         if payload.ask_attribute:
             conf_ledger.note_ask(payload.ask_attribute)
 
