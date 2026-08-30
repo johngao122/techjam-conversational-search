@@ -101,8 +101,7 @@ class Agent:
         self._openings: dict[str, str] = {}
         # Cumulative verbatim constraint memory (evict-on-value-conflict).
         self._memory: dict[str, ConstraintMemory] = {}
-        # LLM-based conversation summarizer using local Ollama (phi3:mini)
-        self._summarizer = OllamaSummarizer(model="phi3:mini")
+        self._summarizer = OllamaSummarizer(model="llama3.2:1b")
         # Cross-session summary storage: keyed by user_id from user_profile.
         self._summaries: dict[str, dict] = {}
 
@@ -223,17 +222,12 @@ class Agent:
         self._ledger.set_search_key(session_id, search_key)
         query = default_query(constraints, user_message)
 
-        # -- 5b. Parallel retrieval sources (independent; NOT fallbacks) ------
-        # Both run every turn. Results are intentionally left UNUSED for now --
-        # this wires the parallel paths so they execute and are ready for a
-        # future fusion/rerank step. The bucket pipeline below still drives the
-        # emitted top-10 (unchanged behaviour). Note the rank_bucket rung-3 BM25
-        # fallback is deliberately not relied upon; this is the first-class BM25.
-        bm25_results = self._retriever.retrieve_bm25(search_key, top_k=top_k)
+        # -- 5b. Parallel retrieval sources -----------------------------------
         llm_search_key = session.get("llm_search_key") or {}
         vector_query = llm_search_key.get("_string")
+        # BM25 uses SQLite which is not thread-safe across threads, so run sequentially.
+        bm25_results = self._retriever.retrieve_bm25(search_key, top_k=top_k)
         vector_results = self._retriever.retrieve_vector(vector_query, top_k=top_k)
-        # del bm25_results, vector_results  # intentionally unused for now
 
         # -- 6. Retrieval + Rerank + Decision (never raises) ------------------
         if self._mode == "legacy":
@@ -258,8 +252,10 @@ class Agent:
             theta=self._theta,
             policy="always_ask",
         )
+        # Fuse bucket (category-scoped), BM25, and vector results via RRF.
         # recommendations = bm25_results
-        recommendations = vector_results
+        # recommendations = vector_results
+        recommendations = self._rrf([recommendations, bm25_results, vector_results])
         if payload.ask_attribute:
             conf_ledger.note_ask(payload.ask_attribute)
 
@@ -276,6 +272,15 @@ class Agent:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _rrf(lists: list[list[str]], k: int = 60) -> list[str]:
+        """Reciprocal Rank Fusion: merge ranked lists by summing 1/(rank+k)."""
+        scores: dict[str, float] = {}
+        for ranked_list in lists:
+            for rank, asin in enumerate(ranked_list):
+                scores[asin] = scores.get(asin, 0.0) + 1.0 / (rank + k)
+        return sorted(scores, key=scores.__getitem__, reverse=True)
 
     @staticmethod
     def _union_search_key(previous: dict[str, list], current: dict[str, list]) -> dict[str, list]:
@@ -336,8 +341,10 @@ class Agent:
 
     @staticmethod
     def _build_summary_search_key(summary: str) -> dict:
-        search_key_string = Agent._extract_search_key_with_llm(summary)
-        return {"_string": search_key_string}
+        # Use summary directly as the vector query — it already captures semantic
+        # intent, so a second LLM call to shorten it is redundant.
+        # search_key_string = Agent._extract_search_key_with_llm(summary)
+        return {"_string": summary}
 
     @staticmethod
     def _extract_search_key_with_llm(summary_text: str) -> str:
