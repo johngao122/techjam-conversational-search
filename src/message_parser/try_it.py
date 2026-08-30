@@ -32,13 +32,11 @@ def main() -> None:
     except FileNotFoundError:
         categories, brands = set(), set()
         print("data/catalog.jsonl not found — running without category/brand matching.")
-        print("(gzip -dk data/catalog.jsonl.gz && mv data/catalog.jsonl data/catalog.jsonl to enable it)")
 
-    # Use regular MessageParser (no Docker model needed)
     parser = MessageParser(known_categories=categories, known_brands=brands)
     print("Type a customer message (or 'quit'):\n")
 
-    # NEW: Test with conversation summarization
+    # Test with conversation summarization
     print("=" * 70)
     print("TESTING WITH CONVERSATION SUMMARIZATION")
     print("=" * 70)
@@ -50,18 +48,12 @@ def main() -> None:
     agent = Agent()
     summarizer = agent._summarizer
     
-    api_key = os.environ.get("API_KEY", "").replace("sk-", "sk-...")[:20]
     if not summarizer._client:
-        print("⚠️  DeepSeek client not initialized.")
-        print("  Check API_KEY env var (currently: {})".format(api_key))
-        print("  Summaries will be empty, but message parsing will work.")
-        print()
+        print("⚠️  Gemini client not initialized. Check GEMINI_API_KEY env var.")
+        print("Message parsing will still work.\n")
     else:
-        print("✓ DeepSeek summarizer initialized")
-        print(f"  API Key: {api_key}...")
-        print(f"  Model: {summarizer._model}")
-        print(f"  Base URL: {summarizer._client.base_url}")
-        print()
+        print("✓ Gemini summarizer initialized")
+        print(f"  Model: {summarizer._model}\n")
 
     # Conversation history tracking
     session_id = "test_session"
@@ -69,9 +61,6 @@ def main() -> None:
     agent.reset(session_id, {"user_id": user_id})
     
     turn = 1
-    print("-" * 70)
-    print()
-    
     while True:
         try:
             text = input("> ").strip()
@@ -82,13 +71,11 @@ def main() -> None:
         
         # Parse the message
         parsed = parser.parse(text)
-        print("\n📝 MESSAGE PARSING:")
-        print("-" * 70)
+        print("\n--- MESSAGE PARSING ---")
         print(json.dumps(parsed.to_dict(), indent=2))
         
         # Add to conversation and summarize
-        print("\n📋 CONVERSATION STATE:")
-        print("-" * 70)
+        print("\n--- CONVERSATION SUMMARIZATION ---")
         with agent._ledger.session(session_id) as s:
             s.setdefault("history", []).append({
                 "turn": turn,
@@ -109,10 +96,8 @@ def main() -> None:
         agent._ledger.set_conversation_summary(session_id, summary)
         
         print(f"Summary: {summary.get('summary', '(not yet)') or '(not yet)'}")
-        prefs = summary.get('remembered_preferences', {})
-        if prefs:
-            print(f"Preferences: {json.dumps(prefs)}")
-        print(f"Topics: {summary.get('topics_covered', [])}")
+        if summary.get('remembered_preferences'):
+            print(f"Preferences: {json.dumps(summary.get('remembered_preferences', {}))}")
         print()
         
         turn += 1
