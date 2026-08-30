@@ -128,6 +128,7 @@ class ConstraintIndex:
         self.attributes: dict[str, set[str]] = {}
         self.text: dict[str, str] = {}
         self.popularity: dict[str, float] = {}
+        self.average_rating: dict[str, float] = {}
         self._document_frequency: dict[str, int] = {}
         # Only ``_exact_weight`` reads this, and only under IDF_WEIGHT=1.
         # Building it unconditionally is a 50k-product tally nobody looks at.
@@ -138,6 +139,7 @@ class ConstraintIndex:
             self.attributes[asin] = attributes
             self.text[asin] = searchable_text(product)
             self.popularity[asin] = math.log1p(float(product.get("rating_number") or 0))
+            self.average_rating[asin] = float(product.get("average_rating") or 0)
             if use_idf:
                 for attribute in attributes:
                     self._document_frequency[attribute] = self._document_frequency.get(attribute, 0) + 1
@@ -173,19 +175,24 @@ class ConstraintIndex:
                 total += weight * TOKEN_WEIGHT
         return total
 
-    def rank(self, pool, constraints, limit: int) -> list[str]:
-        """Order a candidate pool by constraint score, then popularity.
+    def rank(self, pool, constraints, limit: int, rating_style: str | None = None) -> list[str]:
+        """Order a candidate pool by constraint score, then rating-style-weighted popularity.
 
         Popularity is a first-class key rather than a tiebreak that never
         fires: public-set targets sit at the 99.4th percentile of review count,
         so within a bucket it carries real signal on its own.
         """
         popularity = self.popularity
+        avg_rating = self.average_rating
+        style = (rating_style or "").lower()
+        if "critical" in style:
+            w_rating, w_volume = 0.5, 1.5
+        elif "positive" in style:
+            w_rating, w_volume = 1.5, 0.5
+        else:
+            w_rating, w_volume = 1.0, 1.0
         scores = {asin: self.score(asin, constraints) for asin in pool}
-        key = lambda a: (-scores[a], -popularity.get(a, 0.0), a)
+        key = lambda a: (-scores[a], -(w_volume * popularity.get(a, 0.0) + w_rating * avg_rating.get(a, 0.0)), a)
         if limit:
-            # Same key, so ties break identically -- but a partial selection
-            # instead of a full sort. Matters most on the unresolved-bucket
-            # fallback, where the pool is the whole 50k catalog.
             return heapq.nsmallest(limit, pool, key=key)
         return sorted(pool, key=key)
