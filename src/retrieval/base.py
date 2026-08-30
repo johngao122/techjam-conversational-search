@@ -42,7 +42,6 @@ class RetrievalRequest:
     query: str | None = None
     top_k: int = 10
     pool_size: int = 0
-    rating_style: str | None = None
 
 
 @dataclass(frozen=True)

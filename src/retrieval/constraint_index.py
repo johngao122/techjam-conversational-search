@@ -144,14 +144,6 @@ class ConstraintIndex:
         self.popularity: dict[str, float] = {}
         self.average_rating: dict[str, float] = {}
         self._document_frequency: dict[str, int] = {}
-        # Inverted index: attribute -> set of ASINs that have this attribute
-        # Enables O(1) lookup instead of O(n) scan for constraint matching
-        self._inverted: dict[str, set[str]] = {}
-        # Token inverted index: token -> set of ASINs whose text contains this token
-        self._token_inverted: dict[str, set[str]] = {}
-        # Stemmed token inverted index: stem -> set of ASINs
-        # Enables matching "dress" to products with "dresses", "dressed", etc.
-        self._stem_inverted: dict[str, set[str]] = {}
         # Only ``_exact_weight`` reads this, and only under IDF_WEIGHT=1.
         # Building it unconditionally is a 50k-product tally nobody looks at.
         use_idf = os.environ.get("IDF_WEIGHT", "") == "1"
@@ -162,23 +154,6 @@ class ConstraintIndex:
             text = searchable_text(product)
             self.text[asin] = text
             self.popularity[asin] = math.log1p(float(product.get("rating_number") or 0))
-            self.average_rating[asin] = float(product.get("average_rating") or 0)
-            # Build inverted index for exact attribute matches
-            for attr in attributes:
-                if attr not in self._inverted:
-                    self._inverted[attr] = set()
-                self._inverted[attr].add(asin)
-            # Build token inverted index for token containment
-            for token in _TOKEN_RE.findall(text):
-                if len(token) > 2:
-                    if token not in self._token_inverted:
-                        self._token_inverted[token] = set()
-                    self._token_inverted[token].add(asin)
-                    # Also index by stem for fuzzy matching
-                    stemmed = stem_token(token)
-                    if stemmed not in self._stem_inverted:
-                        self._stem_inverted[stemmed] = set()
-                    self._stem_inverted[stemmed].add(asin)
             if use_idf:
                 for attribute in attributes:
                     self._document_frequency[attribute] = self._document_frequency.get(attribute, 0) + 1
@@ -306,7 +281,10 @@ class ConstraintIndex:
         else:
             w_rating, w_volume = 1.0, 1.0
         scores = {asin: self.score(asin, constraints) for asin in pool}
-        key = lambda a: (-scores[a], -(w_volume * popularity.get(a, 0.0) + w_rating * avg_rating.get(a, 0.0)), a)
+        key = lambda a: (-scores[a], -popularity.get(a, 0.0), a)
         if limit:
+            # Same key, so ties break identically -- but a partial selection
+            # instead of a full sort. Matters most on the unresolved-bucket
+            # fallback, where the pool is the whole 50k catalog.
             return heapq.nsmallest(limit, pool, key=key)
         return sorted(pool, key=key)

@@ -177,7 +177,6 @@ class Reranker:
         top_k: int = 10,
         transcript: str = "",
         preference_tags: list[str] | None = None,
-        rating_style: str | None = None,
     ) -> RankResult:
         """Bucket-mode retrieval + verbatim-constraint scoring.
 
@@ -202,8 +201,6 @@ class Reranker:
             result.candidates,
             self._bucket_pipeline.last_prepared,
             pool_size=self._bucket_pipeline.last_pool_size,
-            preference_tags=preference_tags,
-            rating_style=rating_style,
         )
 
     def rank(
@@ -324,8 +321,6 @@ class Reranker:
         ranked: list[str],
         prepared: PreparedConstraints,
         pool_size: int,
-        preference_tags: list[str] | None = None,
-        rating_style: str | None = None,
     ) -> RankResult:
         """Verbatim-constraint coverage over an already-ranked pool.
 
@@ -346,35 +341,6 @@ class Reranker:
                 1 for norm, toks, w in prepared
                 if self._constraint.score(best, [(norm, toks, w)]) > 0.0
             )
-
-        # Second-pass re-sort using rating_style (always) and preference_tags
-        # (only when no constraints matched yet — turn 1 pool is unordered by
-        # constraints so pref signals are the only differentiator).
-        use_prefs = bool(preference_tags) and not prepared
-        if rating_style or use_prefs:
-            products = _hydrate_products(self.catalog, ranked, cache=self._product_cache)
-            pref_matchers = compile_constraints(list(preference_tags or [])) if use_prefs else []
-            style = (rating_style or "").lower()
-            if "critical" in style:
-                w_rating, w_volume = 0.5, 1.5
-            elif "positive" in style:
-                w_rating, w_volume = 1.5, 0.5
-            else:
-                w_rating, w_volume = 1.0, 1.0
-
-            scored = []
-            for retrieval_rank, pid in enumerate(ranked):
-                product = products.get(pid)
-                if product is None:
-                    scored.append((retrieval_rank, 0.0, pid, 0.0))
-                    continue
-                pref_bonus = 0.15 * sum(1 for m in pref_matchers if m.matches(product)) if use_prefs else 0.0
-                rating_score = w_volume * product.rating_number + w_rating * product.average_rating * 1000
-                scored.append((retrieval_rank, pref_bonus, pid, rating_score))
-
-            scored.sort(key=lambda s: (s[0], -s[1], -s[3], s[2]))
-            ranked = [s[2] for s in scored]
-
         return RankResult(
             ranked=ranked,
             pool_size=pool_size,

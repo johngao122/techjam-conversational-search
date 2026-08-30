@@ -191,12 +191,11 @@ class Agent:
 
         # -- 3b. Update conversation summary ---------------------------------
         session = self._ledger.read(session_id)
-        # current_summary = self._ledger.read(session_id).get("conversation_summary", "")
-        # summary = self._summarizer.summarize(
-        #     last_user_message=user_message,
-        #     previous_summary=current_summary or "",
-        # )
-        summary = ""
+        current_summary = self._ledger.read(session_id).get("conversation_summary", "")
+        summary = self._summarizer.summarize(
+            last_user_message=user_message,
+            previous_summary=current_summary or "",
+        )
         self._ledger.set_conversation_summary(session_id, summary)
         # Store in cross-session cache keyed by user_id.
         user_id = session.get("user_profile", {}).get("user_id")
@@ -251,32 +250,11 @@ class Agent:
         rating_style = session.get("user_preference", {}).get("rating_style")
         if self._mode == "legacy":
             rank_fn = lambda: self._reranker.rank(query, constraints, top_k=top_k, preference_tags=pref_tags, rating_style=rating_style)
-        elif self._mode == "hybrid":
-            from src.reranker.types import RankResult
-            _constraint_query = HybridRetriever.build_constraint_query(session, opening_message=opening) if scenario != "intent_override" else ""
-            from src.retrieval.constraint_index import prepare
-            verbatim_constraints = memory.constraints
-            # Apply constraint normalization just-in-time
-            normalized_constraints = [prepare(c)[0] for c in verbatim_constraints]
-
-            _hybrid_pool = self._hybrid_retriever.retrieve(
-                search_key=search_key,
-                vector_query=_constraint_query,
-                constraints=normalized_constraints, # Pass the normalized version
-                top_k=top_k,
-                opening_message=opening,
-            )
-            rank_fn = lambda: RankResult(
-                ranked=_hybrid_pool,
-                pool_size=len(_hybrid_pool),
-                max_coverage=1,
-                top_tier_crowd=1,
-            )
         else:
             verbatim = memory.constraints
             transcript = ""
             rank_fn = lambda: self._reranker.rank_bucket(
-                opening, verbatim, top_k=top_k, transcript=transcript, preference_tags=pref_tags, rating_style=rating_style
+                opening, verbatim, top_k=top_k, transcript=transcript, preference_tags=pref_tags
             )
         known_attrs = set(session.get("constraints", {}).keys())
         payload, recommendations = safe_decide(
