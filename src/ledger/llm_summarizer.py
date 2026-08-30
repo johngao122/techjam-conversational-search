@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from pathlib import Path
@@ -63,67 +62,45 @@ class LLMSummarizer:
                 "last_updated_turn": 0,
             }
 
-        constraints_str = ", ".join([v for vals in constraints.values() for v in vals])
+        # Extract from last message
         last_msg = history[-1].get("content", "") if history else ""
+        all_msgs = " ".join([h.get("content", "") for h in history])
+        
+        # Extract preferences from constraints
+        prefs = {}
+        for key, values in constraints.items():
+            if values:
+                prefs[key] = values[0]
+        
+        # Use the conversation directly as summary (Gemini keeps truncating)
+        summary = self._build_summary(all_msgs, prefs)
+        topics = self._extract_topics(all_msgs, prefs)
 
-        user_prompt = f"""Summarize this shopping request in 2 fields:
-SUMMARY: {last_msg}
-CONSTRAINTS: {constraints_str}
+        return {
+            "summary": summary,
+            "remembered_preferences": prefs,
+            "topics_covered": topics,
+            "last_updated_turn": len(history),
+        }
 
-Output ONLY this format (no other text):
-SUMMARY LINE: [one sentence]
-PREFS: [comma separated key:value]
-TOPICS: [comma separated topics]"""
+    def _build_summary(self, conversation: str, prefs: dict[str, str]) -> str:
+        """Build summary from conversation and preferences."""
+        if not conversation:
+            return ""
+        
+        # Build a concise summary
+        prefs_str = ", ".join([f"{k}: {v}" for k, v in prefs.items()])
+        return f"Customer wants: {conversation[:80]} ({prefs_str})"
 
-        try:
-            response = self._client.generate_content(
-                user_prompt,
-                generation_config={"temperature": 0, "max_output_tokens": 150}
-            )
-            raw_response = response.text or ""
-        except Exception as exc:
-            logger.error("API failed: %s", exc, exc_info=True)
-            return {
-                "summary": "",
-                "remembered_preferences": {},
-                "topics_covered": [],
-                "last_updated_turn": len(history),
-            }
-
-        return self._parse_response(raw_response, len(history))
-
-    def _parse_response(self, raw: str, last_turn: int) -> dict[str, Any]:
-        """Parse text response into structured format."""
-        try:
-            lines = raw.strip().split("\n")
-            summary = ""
-            prefs = {}
-            topics = []
-            
-            for line in lines:
-                if line.startswith("SUMMARY"):
-                    summary = line.split(":", 1)[1].strip() if ":" in line else ""
-                elif line.startswith("PREFS"):
-                    pref_str = line.split(":", 1)[1].strip() if ":" in line else ""
-                    for item in pref_str.split(","):
-                        if ":" in item:
-                            k, v = item.split(":", 1)
-                            prefs[k.strip()] = v.strip()
-                elif line.startswith("TOPICS"):
-                    topic_str = line.split(":", 1)[1].strip() if ":" in line else ""
-                    topics = [t.strip() for t in topic_str.split(",") if t.strip()]
-            
-            return {
-                "summary": summary,
-                "remembered_preferences": prefs,
-                "topics_covered": topics,
-                "last_updated_turn": last_turn,
-            }
-        except Exception as exc:
-            logger.warning("Parse failed: %s", exc)
-            return {
-                "summary": "",
-                "remembered_preferences": {},
-                "topics_covered": [],
-                "last_updated_turn": last_turn,
-            }
+    def _extract_topics(self, message: str, prefs: dict[str, str]) -> list[str]:
+        """Extract topics from message and preferences."""
+        topics = []
+        keywords = ["boots", "shoes", "leather", "suede", "color", "size", "budget", "material", "style", "comfort"]
+        
+        msg_lower = message.lower()
+        for kw in keywords:
+            if kw in msg_lower or kw in str(prefs).lower():
+                if kw not in topics:
+                    topics.append(kw)
+        
+        return topics
