@@ -1,10 +1,4 @@
-"""LLM-based conversation summarizer using DeepSeek API.
-
-Reads configuration from environment variables:
-    API_KEY              DeepSeek API key (required)
-    DEEPSEEK_BASE_URL    API endpoint, defaults to https://api.deepseek.com
-    DEEPSEEK_MODEL       Model name, defaults to deepseek-chat
-"""
+"""LLM-based conversation summarizer using Google Gemini API."""
 
 from __future__ import annotations
 
@@ -14,7 +8,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-# Load .env file if it exists
 try:
     from dotenv import load_dotenv
     load_dotenv(Path(".env"))
@@ -25,30 +18,35 @@ logger = logging.getLogger(__name__)
 
 
 class LLMSummarizer:
-    """Summarizes conversation history using DeepSeek API."""
+    """Summarizes conversation history using Google Gemini API."""
 
     def __init__(self) -> None:
-        api_key = os.environ.get("API_KEY")
+        api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
-            logger.warning("API_KEY not set; LLMSummarizer will not be functional")
+            logger.warning("GEMINI_API_KEY not set; LLMSummarizer will not be functional")
             self._client = None
+            self._model = None
             return
 
-        base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-        model = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
+        model = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
         try:
-            from openai import OpenAI  # noqa: PLC0415
+            import google.generativeai as genai  # noqa: PLC0415
         except ImportError as exc:
-            logger.error("openai package required for LLMSummarizer: %s", exc)
+            logger.error("google-generativeai package required: %s", exc)
             self._client = None
+            self._model = None
             return
 
-        self._client = OpenAI(base_url=base_url, api_key=api_key)
-        self._model = model
-        logger.debug(
-            "LLMSummarizer initialized: model=%s, base_url=%s", model, base_url
-        )
+        try:
+            genai.configure(api_key=api_key)
+            self._client = genai.GenerativeModel(model)
+            self._model = model
+            logger.debug("LLMSummarizer initialized: %s", model)
+        except Exception as exc:
+            logger.error("Failed to initialize Gemini: %s", exc)
+            self._client = None
+            self._model = None
 
     def summarize(
         self,
@@ -56,24 +54,7 @@ class LLMSummarizer:
         constraints: dict[str, list[str]],
         intent: str | None,
     ) -> dict[str, Any]:
-        """Summarize conversation history into a structured summary.
-
-        Parameters
-        ----------
-        history
-            List of dicts with keys: turn, role, content
-            Expected format: [{"turn": 1, "role": "user", "content": "..."}, ...]
-        constraints
-            Dict of attribute -> list of values, e.g. {"color": ["black"], "size": ["9"]}
-        intent
-            Current intent: "buying", "browsing", "intent_override", "boundary", or None
-
-        Returns
-        -------
-        dict
-            Keys: summary (str), remembered_preferences (dict), topics_covered (list),
-            last_updated_turn (int)
-        """
+        """Summarize conversation history into a structured summary."""
         if not self._client or not history:
             return {
                 "summary": "",
@@ -82,39 +63,26 @@ class LLMSummarizer:
                 "last_updated_turn": 0,
             }
 
-        history_text = self._format_history(history)
-        constraints_text = json.dumps(constraints, indent=2)
+        constraints_str = ", ".join([v for vals in constraints.values() for v in vals])
+        last_msg = history[-1].get("content", "") if history else ""
 
-        user_prompt = f"""\
-Summarize the customer's conversation history, preferences, and product requirements.
+        user_prompt = f"""Summarize this shopping request in 2 fields:
+SUMMARY: {last_msg}
+CONSTRAINTS: {constraints_str}
 
-## Conversation History
-{history_text}
-
-## Extracted Constraints
-{constraints_text}
-
-## Current Intent
-{intent or "unknown"}
-
-Respond with ONLY a valid JSON object (no markdown, no extra text):
-{{
-  "summary": "one sentence summarizing their search intent and key requirements",
-  "remembered_preferences": {{"attribute": "value", ...}},
-  "topics_covered": ["topic1", "topic2", ...]
-}}
-"""
+Output ONLY this format (no other text):
+SUMMARY LINE: [one sentence]
+PREFS: [comma separated key:value]
+TOPICS: [comma separated topics]"""
 
         try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=[{"role": "user", "content": user_prompt}],
-                temperature=0.1,
-                max_tokens=256,
+            response = self._client.generate_content(
+                user_prompt,
+                generation_config={"temperature": 0, "max_output_tokens": 150}
             )
-            raw_response = response.choices[0].message.content or ""
-        except Exception as exc:  # noqa: BLE001
-            logger.error("DeepSeek API call failed: %s", exc, exc_info=True)
+            raw_response = response.text or ""
+        except Exception as exc:
+            logger.error("API failed: %s", exc, exc_info=True)
             return {
                 "summary": "",
                 "remembered_preferences": {},
@@ -124,42 +92,35 @@ Respond with ONLY a valid JSON object (no markdown, no extra text):
 
         return self._parse_response(raw_response, len(history))
 
-    def _format_history(self, history: list[dict[str, str]]) -> str:
-        """Format conversation history for the prompt."""
-        lines = []
-        for entry in history:
-            turn = entry.get("turn", "?")
-            content = entry.get("content", "")
-            lines.append(f"Turn {turn}: {content}")
-        return "\n".join(lines) if lines else "(empty)"
-
     def _parse_response(self, raw: str, last_turn: int) -> dict[str, Any]:
-        """Parse LLM response into structured summary."""
+        """Parse text response into structured format."""
         try:
-            cleaned = raw.strip()
-            if cleaned.startswith("```"):
-                lines = cleaned.splitlines()
-                inner = []
-                in_block = False
-                for line in lines:
-                    if line.startswith("```") and not in_block:
-                        in_block = True
-                        continue
-                    if line.startswith("```") and in_block:
-                        break
-                    if in_block:
-                        inner.append(line)
-                cleaned = "\n".join(inner)
-
-            data = json.loads(cleaned)
+            lines = raw.strip().split("\n")
+            summary = ""
+            prefs = {}
+            topics = []
+            
+            for line in lines:
+                if line.startswith("SUMMARY"):
+                    summary = line.split(":", 1)[1].strip() if ":" in line else ""
+                elif line.startswith("PREFS"):
+                    pref_str = line.split(":", 1)[1].strip() if ":" in line else ""
+                    for item in pref_str.split(","):
+                        if ":" in item:
+                            k, v = item.split(":", 1)
+                            prefs[k.strip()] = v.strip()
+                elif line.startswith("TOPICS"):
+                    topic_str = line.split(":", 1)[1].strip() if ":" in line else ""
+                    topics = [t.strip() for t in topic_str.split(",") if t.strip()]
+            
             return {
-                "summary": str(data.get("summary", "")).strip(),
-                "remembered_preferences": data.get("remembered_preferences", {}),
-                "topics_covered": data.get("topics_covered", []),
+                "summary": summary,
+                "remembered_preferences": prefs,
+                "topics_covered": topics,
                 "last_updated_turn": last_turn,
             }
-        except (json.JSONDecodeError, ValueError) as exc:
-            logger.warning("Failed to parse LLM response: %s", exc)
+        except Exception as exc:
+            logger.warning("Parse failed: %s", exc)
             return {
                 "summary": "",
                 "remembered_preferences": {},
