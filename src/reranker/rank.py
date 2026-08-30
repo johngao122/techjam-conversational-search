@@ -152,6 +152,7 @@ class Reranker:
         constraints: list[str] | None = None,
         top_k: int = 10,
         transcript: str = "",
+        preference_tags: list[str] | None = None,
     ) -> RankResult:
         """Deterministic bucket -> verbatim-constraint -> popularity ranking.
 
@@ -225,6 +226,13 @@ class Reranker:
             if norm
         ]
 
+        # Soft preference tags from user profile: appended at low weight so they
+        # nudge tie-breaks without overriding session-specific constraints.
+        for tag in (preference_tags or []):
+            norm, toks = prepare(tag)
+            if norm and not is_inert(tag):
+                prepared.append((norm, toks, 0.15))
+
         # Paraphrase insurance: score the bucket by transcript-token overlap
         # when the verbatim path produced nothing AND the opening category
         # itself failed to resolve exactly -- i.e. the template wording drifted.
@@ -263,6 +271,8 @@ class Reranker:
         constraints: list[str] | None = None,
         top_k: int = 10,
         pool_size: int = DEFAULT_POOL,
+        preference_tags: list[str] | None = None,
+        rating_style: str | None = None,
     ) -> RankResult:
         constraints = constraints or []
         cache_key = (query, pool_size)
@@ -278,6 +288,7 @@ class Reranker:
 
         # Compile each constraint once, then reuse across all candidates.
         matchers = compile_constraints(constraints)
+        pref_matchers = compile_constraints(list(preference_tags or []))
 
         # Score each candidate: coverage, retrieval rank (lower=better), rating.
         # Track max coverage and its crowd in the same scan (no second pass).
@@ -289,7 +300,9 @@ class Reranker:
             if product is None:
                 continue
             cov = sum(1 for m in matchers if m.matches(product))
-            scored.append((cov, retrieval_rank, product))
+            pref_bonus = 0.15 * sum(1 for m in pref_matchers if m.matches(product))
+            score = cov + pref_bonus
+            scored.append((score, retrieval_rank, product))
             if cov > max_coverage:
                 max_coverage = cov
                 top_tier_crowd = 1
@@ -299,13 +312,24 @@ class Reranker:
         if not scored:
             return RankResult()
 
+        # rating_style adjusts how much average_rating vs rating_number (volume)
+        # influences tie-breaking. A "critical" rater deflates scores, making
+        # average_rating noisy -- lean on volume. A "usually positive" rater's
+        # high scores are meaningful -- lean on average_rating.
+        style = (rating_style or "").lower()
+        if "critical" in style:
+            w_rating, w_volume = 0.5, 1.5
+        elif "positive" in style:
+            w_rating, w_volume = 1.5, 0.5
+        else:  # "mixed" or unknown
+            w_rating, w_volume = 1.0, 1.0
+
         # Rerank: coverage desc, retrieval rank asc, rating desc, id asc (stable).
         scored.sort(
             key=lambda s: (
                 -s[0],
                 s[1],
-                -s[2].rating_number,
-                -s[2].average_rating,
+                -(w_volume * s[2].rating_number + w_rating * s[2].average_rating * 1000),
                 s[2].parent_asin,
             )
         )

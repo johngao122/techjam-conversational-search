@@ -26,7 +26,7 @@ def _empty_entry(session_id: str, user_profile: dict) -> dict:
         "turn": 0,
         "intent": None,
         "constraints": {},
-        "soft_preferences": [],
+        "user_preference": {"preference_tags": [], "rating_style": None},
         "asked_attributes": [],
         "search_key": {},
     }
@@ -132,16 +132,19 @@ class LedgerService:
             self._store[session_id]["constraints"][attribute] = [value]
 
     def clear_constraints(self, session_id: str) -> None:
-        """Wipe constraints and soft preferences on intent override."""
+        """Wipe constraints and user preferences on intent override."""
         with self._session_lock(session_id):
             self._store[session_id]["constraints"].clear()
-            self._store[session_id]["soft_preferences"].clear()
+            self._store[session_id]["user_preference"] = {"preference_tags": [], "rating_style": None}
 
-    def add_soft_preference(self, session_id: str, preference: str) -> None:
+    def add_user_preference(self, session_id: str, preference_tags: list[str], rating_style: str | None = None) -> None:
         with self._session_lock(session_id):
-            prefs = self._store[session_id]["soft_preferences"]
-            if preference not in prefs:
-                prefs.append(preference)
+            pref = self._store[session_id]["user_preference"]
+            for tag in preference_tags:
+                if tag not in pref["preference_tags"]:
+                    pref["preference_tags"].append(tag)
+            if rating_style is not None:
+                pref["rating_style"] = rating_style
 
     def mark_attribute_asked(self, session_id: str, attribute: str) -> None:
         if attribute not in ALLOWED_ATTRIBUTES:
