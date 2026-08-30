@@ -46,21 +46,25 @@ class OllamaSummarizer:
         if not last_msg or not self._client:
             return self._polish_message(last_msg)
 
-        prompt = f"""Write what the customer currently wants in ONE sentence.
-
+        prompt = f"""CUSTOMER'S LATEST MESSAGE: "{last_msg}"
 PREVIOUS REQUEST: {previous_summary if previous_summary else "none"}
-NEW MESSAGE: "{last_msg}"
 
-Extract ONLY what they want NOW (the latest stated request):
-- If message has "nevermind": extract the NEW request, ignore previous
-- If message is vague ("show me", "pink ones"): apply to previous product
-- Format: "Customer wants [product] [attributes]"
+Write ONE sentence describing what the customer wants RIGHT NOW.
+
+RULES (apply in order):
+1. If the latest message contains "nevermind", "nevermine", "instead", "actually", "forget", "change", or similar — the previous request is CANCELLED. Summarize ONLY what is stated in the latest message. Carry over the product type ONLY if no new product is mentioned.
+2. If the latest message uses a vague pronoun like "ones", "them", "it", or gives only a color/size/brand with no product — carry over ONLY the product type from the previous request, nothing else.
+3. Otherwise — summarize the latest message on its own.
+
+STRICT: Only include attributes explicitly stated in the latest message. Do NOT invent or carry over any detail that was not mentioned in the latest message.
 
 Examples:
-- New="shopping carts" → "Customer wants to see shopping carts"
-- Previous="carts", New="show me pink ones" → "Customer wants pink shopping carts"
+- Previous="Customer wants pink shoes.", Latest="nevermine give red" → "Customer wants red shoes."
+- Previous="Customer wants pink shoes.", Latest="give me brown ones instead" → "Customer wants brown shoes."
+- Previous="Customer wants pink shoes.", Latest="size 10 please" → "Customer wants pink shoes in size 10."
 
-Output ONLY one sentence:"""
+Format: "Customer wants [product] [attributes]."
+Output ONLY that one sentence, nothing else:"""
 
         try:
             response = self._client.generate(
