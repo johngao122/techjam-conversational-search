@@ -11,7 +11,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any
+
+# Load .env file if it exists
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(".env"))
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
 
