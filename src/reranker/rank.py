@@ -221,7 +221,13 @@ class Reranker:
             pool_size=pool_size,
         )
         candidate_ids = self._bm25.candidates(request).candidates
-        return self.score_by_coverage(candidate_ids, constraints, top_k=top_k)
+        return self.score_by_coverage(
+            candidate_ids,
+            constraints,
+            top_k=top_k,
+            preference_tags=preference_tags,
+            rating_style=rating_style,
+        )
 
     # ------------------------------------------------------------------
     # Scoring cores: pure functions of a candidate pool. They take an
@@ -234,6 +240,8 @@ class Reranker:
         candidate_ids: list[str],
         constraints: list[str],
         top_k: int = 10,
+        preference_tags: list[str] | None = None,
+        rating_style: str | None = None,
     ) -> RankResult:
         """Coverage scoring: order by (coverage, retrieval rank, rating).
 
