@@ -106,7 +106,13 @@ class Agent:
         self._memory: dict[str, ConstraintMemory] = {}
 
     def reset(self, session_id: str, user_profile: dict) -> None:
-        self._ledger.create(session_id, user_profile or {})
+        user_profile = user_profile or {}
+        self._ledger.create(session_id, user_profile)
+        self._ledger.add_user_preference(
+            session_id,
+            preference_tags=user_profile.get("preference_tags", []),
+            rating_style=user_profile.get("rating_style"),
+        )
         self._sessions[session_id] = SessionLedger(session_id=session_id)
         self._openings.pop(session_id, None)
         self._memory[session_id] = ConstraintMemory()
@@ -151,11 +157,8 @@ class Agent:
         new_attrs = extract_attributes(user_message)
         price = _parse_price_constraint(user_message)
 
-        user_pref = new_attrs.pop("feature", None)
         for attr, value in new_attrs.items():
             self._ledger.set_constraint(session_id, attr, value)
-        if user_pref:
-            self._ledger.add_user_preference(session_id, user_pref)
 
         if price:
             with self._ledger.session(session_id) as s:

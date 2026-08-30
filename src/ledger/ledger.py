@@ -26,7 +26,7 @@ def _empty_entry(session_id: str, user_profile: dict) -> dict:
         "turn": 0,
         "intent": None,
         "constraints": {},
-        "user_preference": [],
+        "user_preference": {"preference_tags": [], "rating_style": None},
         "asked_attributes": [],
         "search_key": {},
     }
@@ -121,13 +121,16 @@ class LedgerService:
         """Wipe constraints and user preferences on intent override."""
         with self._session_lock(session_id):
             self._store[session_id]["constraints"].clear()
-            self._store[session_id]["user_preference"].clear()
+            self._store[session_id]["user_preference"] = {"preference_tags": [], "rating_style": None}
 
-    def add_user_preference(self, session_id: str, preference: str) -> None:
+    def add_user_preference(self, session_id: str, preference_tags: list[str], rating_style: str | None = None) -> None:
         with self._session_lock(session_id):
-            prefs = self._store[session_id]["user_preference"]
-            if preference not in prefs:
-                prefs.append(preference)
+            pref = self._store[session_id]["user_preference"]
+            for tag in preference_tags:
+                if tag not in pref["preference_tags"]:
+                    pref["preference_tags"].append(tag)
+            if rating_style is not None:
+                pref["rating_style"] = rating_style
 
     def mark_attribute_asked(self, session_id: str, attribute: str) -> None:
         if attribute not in ALLOWED_ATTRIBUTES:
