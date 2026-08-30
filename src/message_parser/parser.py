@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from .vocab import (
     BUDGET_RE,
@@ -90,7 +91,25 @@ def _is_negated(lowered_text: str, match_start: int) -> bool:
     boundaries = list(_CLAUSE_BOUNDARY_RE.finditer(window))
     if boundaries:
         window = window[boundaries[-1].end():]
-    return any(re.search(rf"\b{re.escape(cue)}\b", window) for cue in NEGATION_CUES)
+    return _NEGATION_RE.search(window) is not None
+
+
+_NEGATION_RE = re.compile(
+    r"\b(" + "|".join(re.escape(cue) for cue in NEGATION_CUES) + r")\b"
+)
+
+
+@lru_cache(maxsize=8)
+def _compiled_vocab(vocab: tuple[str, ...]) -> tuple[re.Pattern, tuple[tuple[str, re.Pattern], ...]]:
+    """(combined-alternation, per-term patterns) for a keyword vocabulary.
+
+    Compiled once per vocabulary rather than re-escaped and re-hashed into
+    ``re``'s internal cache on every call.
+    """
+    return (
+        re.compile(r"\b(" + "|".join(re.escape(t) for t in vocab) + r")\b"),
+        tuple((t, re.compile(rf"\b{re.escape(t)}\b")) for t in vocab),
+    )
 
 
 def _all_keyword_hits(lowered_text: str, vocab: tuple[str, ...]) -> tuple[list[str], list[str]]:
@@ -101,10 +120,17 @@ def _all_keyword_hits(lowered_text: str, vocab: tuple[str, ...]) -> tuple[list[s
     unclaimed second match (e.g. "outdoor" claimed as use_case but "work"
     not, from ".. Outdoor & Work Snow & Cold Weather ..") stays free for a
     later, wrong classifier (e.g. brand) to grab."""
+    any_re, patterns = _compiled_vocab(vocab)
+    # Cheap reject: most messages hit none of the ~100 style / ~40 use-case
+    # terms, and one alternation answers that in a single scan. The per-term
+    # loop below still runs in vocab order when it does hit, because callers
+    # depend on the first *positive* hit being the first in vocab order.
+    if not any_re.search(lowered_text):
+        return [], []
     all_hits: list[str] = []
     positive_hits: list[str] = []
-    for term in vocab:
-        match = re.search(rf"\b{re.escape(term)}\b", lowered_text)
+    for term, pattern in patterns:
+        match = pattern.search(lowered_text)
         if not match:
             continue
         all_hits.append(term)

@@ -26,7 +26,7 @@ def _empty_entry(session_id: str, user_profile: dict) -> dict:
         "turn": 0,
         "intent": None,
         "constraints": {},
-        "soft_preferences": [],
+        "user_preference": {"preference_tags": [], "rating_style": None},
         "asked_attributes": [],
         "search_key": {},
         "llm_search_key": {},
@@ -54,6 +54,16 @@ class LedgerService:
     def read(self, session_id: str) -> dict:
         with self._session_lock(session_id):
             return copy.deepcopy(self._store[session_id])
+
+    def read_ref(self, session_id: str) -> dict:
+        """The live session dict -- **read-only**, do not mutate.
+
+        ``read`` deep-copies, which on a session whose ``history`` grows every
+        turn makes repeated reads O(turns^2). Callers that only inspect the
+        state (and go through ``session()`` to change it) should use this.
+        """
+        with self._session_lock(session_id):
+            return self._store[session_id]
 
     def delete(self, session_id: str) -> None:
         with self._global_lock:
@@ -88,7 +98,11 @@ class LedgerService:
             except Exception:
                 raise
             else:
-                self._store[session_id] = copy.deepcopy(snapshot)
+                # The snapshot is already a private copy nobody else holds, so
+                # it can be installed directly; copying it a second time was
+                # pure overhead. On the exception path the store is left
+                # untouched, which is what makes the write-back atomic.
+                self._store[session_id] = snapshot
 
     # ------------------------------------------------------------------
     # Helpers
@@ -120,16 +134,19 @@ class LedgerService:
             self._store[session_id]["constraints"][attribute] = [value]
 
     def clear_constraints(self, session_id: str) -> None:
-        """Wipe constraints and soft preferences on intent override."""
+        """Wipe constraints and user preferences on intent override."""
         with self._session_lock(session_id):
             self._store[session_id]["constraints"].clear()
-            self._store[session_id]["soft_preferences"].clear()
+            self._store[session_id]["user_preference"] = {"preference_tags": [], "rating_style": None}
 
-    def add_soft_preference(self, session_id: str, preference: str) -> None:
+    def add_user_preference(self, session_id: str, preference_tags: list[str], rating_style: str | None = None) -> None:
         with self._session_lock(session_id):
-            prefs = self._store[session_id]["soft_preferences"]
-            if preference not in prefs:
-                prefs.append(preference)
+            pref = self._store[session_id]["user_preference"]
+            for tag in preference_tags:
+                if tag not in pref["preference_tags"]:
+                    pref["preference_tags"].append(tag)
+            if rating_style is not None:
+                pref["rating_style"] = rating_style
 
     def mark_attribute_asked(self, session_id: str, attribute: str) -> None:
         if attribute not in ALLOWED_ATTRIBUTES:

@@ -1,8 +1,36 @@
 {
   "sample_count": 200,
-  "startup_s": 2.1375,
-  "total_eval_s": 28.3898,
-  "total_turns": 794,
-  "avg_turn_ms": 33.0468,
-  "max_turn_ms": 119.0941
+  "catalog_index_s": 0.4394,
+  "agent_init_s": 5.867,
+  "startup_s": 6.3064,
+  "total_eval_s": 6.7407,
+  "total_turns": 413,
+  "peak_rss_mb": 668.8,
+  "first_turn_ms": 4.6468,
+  "turn": {
+    "mean_ms": 1.048,
+    "p50_ms": 0.6482,
+    "p90_ms": 2.4373,
+    "p95_ms": 3.4528,
+    "p99_ms": 5.4363,
+    "max_ms": 6.6733
+  },
+  "steady_state_turn": {
+    "mean_ms": 1.0393,
+    "p50_ms": 0.6482,
+    "p90_ms": 2.3862,
+    "p95_ms": 3.3778,
+    "p99_ms": 5.4363,
+    "max_ms": 6.6733
+  },
+  "reset": {
+    "mean_ms": 0.0076,
+    "p50_ms": 0.0067,
+    "p90_ms": 0.0105,
+    "p95_ms": 0.0117,
+    "p99_ms": 0.0226,
+    "max_ms": 0.0264
+  },
+  "avg_turn_ms": 1.048,
+  "max_turn_ms": 6.6733
 }
