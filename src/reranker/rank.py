@@ -1,13 +1,21 @@
-"""Reranker core: retrieve -> coverage-rerank -> RankResult.
+"""Reranker core: score a retrieved candidate pool -> RankResult.
 
 Public API:
     build_reranker(catalog_path) -> Reranker
     Reranker.rank(query, constraints, top_k) -> RankResult
+    Reranker.rank_bucket(opening_message, constraints, top_k, transcript) -> RankResult
     default_query(constraints) -> str        # helper to build a query from constraints
 
-``rank`` reranks retrieved candidates by (coverage desc, retrieval rank asc,
-rating desc) and assembles the internals the confidence check needs:
-``max_coverage`` and ``top_tier_crowd``.
+Single responsibility: the ``Reranker`` *scores and orders an already-produced
+candidate pool* and assembles the internals the confidence check needs
+(``max_coverage`` / ``top_tier_crowd``). Producing the pool -- and choosing
+which of the retrieval methods to use -- is delegated to the retrieval
+strategies (:mod:`src.retrieval.strategies`), which the reranker consumes
+through the uniform :class:`~src.retrieval.base.RetrievalResult` boundary.
+
+Two scoring cores live here:
+  * ``rank``        -- coverage-based (legacy BM25 path)
+  * ``rank_bucket`` -- verbatim-constraint-based (bucket path)
 """
 
 from __future__ import annotations
@@ -17,12 +25,18 @@ import os
 from src.catalog.catalog import Catalog
 from src.catalog.loader import load_catalog_rows
 from src.reranker.coverage import Product, compile_constraints
+from src.retrieval.base import RetrievalRequest
+from src.retrieval.constraint_index import ConstraintIndex
 from src.retrieval.buckets import BucketIndex
-from src.retrieval.constraint_index import ConstraintIndex, is_inert, prepare
 from src.retrieval.retrieval import Retriever
+from src.retrieval.strategies import (
+    Bm25Strategy,
+    BucketPipeline,
+    BucketStrategy,
+    ConstraintStrategy,
+    DEFAULT_POOL,
+)
 from src.reranker.types import RankResult
-
-DEFAULT_POOL = 200
 
 
 def retrieval_mode() -> str:
@@ -116,26 +130,27 @@ def _rows_to_products(rows: list[tuple]) -> dict[str, Product]:
 
 
 class Reranker:
+    """Scores an already-retrieved candidate pool into a :class:`RankResult`.
+
+    Retrieval (which method, in what order, with what caching) is delegated to
+    the injected strategies; the reranker only scores and assembles.
+    """
+
     def __init__(
         self,
         catalog: Catalog,
-        retriever: Retriever,
-        bucket_index: BucketIndex | None = None,
-        constraint_index: ConstraintIndex | None = None,
+        bm25: Bm25Strategy | None = None,
+        bucket_pipeline: BucketPipeline | None = None,
+        constraint: ConstraintStrategy | None = None,
     ) -> None:
         self.catalog = catalog
-        self.retriever = retriever
-        self.bucket_index = bucket_index
-        self.constraint_index = constraint_index
-        # Process-lifetime, content-addressed caches: the catalog is
-        # read-only for the duration of a run, so a cache hit is always
-        # exactly the value the uncached path would have computed.
-        self._bm25_cache: dict[tuple[str, int], list[str]] = {}
+        self._bm25 = bm25
+        self._bucket_pipeline = bucket_pipeline
+        self._constraint = constraint
+        # Process-lifetime, content-addressed product cache: the catalog is
+        # read-only for the duration of a run, so a cache hit is always exactly
+        # the value the uncached path would have computed.
         self._product_cache: dict[str, Product] = {}
-        # Per-session resolved bucket key, keyed by opening message. The
-        # coarse category is disclosed once (turn 1) and holds for the whole
-        # session, so resolution is cached rather than re-run every turn.
-        self._bucket_cache: dict[str, list[str]] = {}
 
     def rank_bucket(
         self,
@@ -144,70 +159,29 @@ class Reranker:
         top_k: int = 10,
         transcript: str = "",
     ) -> RankResult:
-        """Deterministic bucket -> verbatim-constraint -> popularity ranking.
+        """Verbatim-constraint scoring of the bucket-mode candidate pool.
 
-        The opening message names (verbatim, on the public set) the target's
-        own coarse category, which resolves to a bucket guaranteed to contain
-        the target. Within that pool candidates are scored by weighted
-        verbatim-constraint match, then popularity.
-
-        Robustness ladder, each rung degrading rather than losing the turn:
-          1. resolved bucket + verbatim constraints  (primary path)
-          2. resolved bucket + popularity            (no constraint matched yet)
-          3. whole catalog, narrowed by BM25 over the accumulated transcript
-             (category unresolved -- template/paraphrase drift on the private set)
-          4. whole catalog + popularity              (nothing else fired)
+        The candidate pool -- resolved bucket, whole-catalog BM25 fallback, and
+        the paraphrase-insurance token scoring -- is produced by the injected
+        :class:`~src.retrieval.strategies.BucketPipeline`. This method only
+        computes the coverage internals the confidence gate reads.
         """
-        if self.constraint_index is None or self.bucket_index is None:
+        if self._bucket_pipeline is None or self._constraint is None:
             return RankResult()
         constraints = constraints or []
 
-        resolved = True
-        resolved_exact = True
-        cached = self._bucket_cache.get(opening_message)
-        if cached is None:
-            key, how = self.bucket_index.resolve(opening_message)
-            pool = self.bucket_index.get(key) if key else []
-            resolved_exact = how == "exact"
-            if not pool:
-                resolved = False
-                pool = list(self.constraint_index.attributes.keys())
-            self._bucket_cache[opening_message] = (pool, resolved, resolved_exact)
-        else:
-            pool, resolved, resolved_exact = cached
-
-        # Rung 3: category unresolved -> narrow the whole-catalog pool with a
-        # BM25 pass over the accumulated transcript (not just parsed spans, so
-        # a reworded disclosure still contributes). Only when a transcript is
-        # available; otherwise fall straight through to popularity.
-        if not resolved and transcript.strip():
-            bm25_pool = self.retriever.retrieve_bm25(
-                {"keywords": [transcript]}, top_k=DEFAULT_POOL
-            )
-            if bm25_pool:
-                pool = bm25_pool
-
-        prepared = [
-            (norm, toks, 1.0)
-            for norm, toks in (prepare(c) for c in constraints if not is_inert(c))
-            if norm
-        ]
-
-        # Paraphrase insurance: score the bucket by transcript-token overlap
-        # when the verbatim path produced nothing AND the opening category
-        # itself failed to resolve exactly -- i.e. the template wording drifted.
-        # Gating on the inexact-resolution signal keeps the clean public set
-        # (where the category always resolves exactly and an exact constraint
-        # match dominates) completely untouched.
-        if not prepared and not resolved_exact and transcript.strip():
-            _, t_toks = prepare(transcript)
-            for tok in dict.fromkeys(t_toks):
-                prepared.append((tok, (tok,), 0.15))
-
-        ranked = self.constraint_index.rank(pool, prepared, top_k)
+        request = RetrievalRequest(
+            opening_message=opening_message,
+            constraints=constraints,
+            transcript=transcript,
+            top_k=top_k,
+        )
+        result = self._bucket_pipeline.candidates(request)
+        ranked = result.candidates
         if not ranked:
             return RankResult()
 
+        prepared = self._bucket_pipeline.last_prepared
         # max_coverage / crowd are advisory internals for the confidence gate;
         # in bucket mode the exposure gate is turn-based, so a coarse count of
         # constraints that landed a nonzero score on the top candidate suffices.
@@ -216,11 +190,11 @@ class Reranker:
             best = ranked[0]
             max_cov = sum(
                 1 for norm, toks, w in prepared
-                if self.constraint_index.score(best, [(norm, toks, w)]) > 0.0
+                if self._constraint.score(best, [(norm, toks, w)]) > 0.0
             )
         return RankResult(
             ranked=ranked,
-            pool_size=len(pool),
+            pool_size=self._bucket_pipeline.last_pool_size,
             max_coverage=max_cov,
             top_tier_crowd=1,
         )
@@ -233,12 +207,10 @@ class Reranker:
         pool_size: int = DEFAULT_POOL,
     ) -> RankResult:
         constraints = constraints or []
-        cache_key = (query, pool_size)
-        candidate_ids = self._bm25_cache.get(cache_key)
-        if candidate_ids is None:
-            candidate_ids = self.retriever.retrieve_bm25({"keywords": [query]}, top_k=pool_size)
-            self._bm25_cache[cache_key] = candidate_ids
+        if self._bm25 is None:
+            return RankResult()
 
+        candidate_ids = self._bm25.search(query, pool_size)
         if not candidate_ids:
             return RankResult()
 
@@ -296,4 +268,12 @@ def build_reranker(catalog_path: str) -> Reranker:
     rows = load_catalog_rows(str(catalog_path))
     bucket_index = BucketIndex(rows)
     constraint_index = ConstraintIndex(rows)
-    return Reranker(catalog, retriever, bucket_index, constraint_index)
+
+    # Wrap each retrieval method as a strategy; the bucket-mode ladder is the
+    # composite that orchestrates all three.
+    bm25 = Bm25Strategy(retriever)
+    constraint = ConstraintStrategy(constraint_index)
+    bucket = BucketStrategy(bucket_index, constraint_index)
+    bucket_pipeline = BucketPipeline(bucket, constraint, bm25)
+
+    return Reranker(catalog, bm25=bm25, bucket_pipeline=bucket_pipeline, constraint=constraint)
