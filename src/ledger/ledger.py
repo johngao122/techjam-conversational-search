@@ -53,6 +53,16 @@ class LedgerService:
         with self._session_lock(session_id):
             return copy.deepcopy(self._store[session_id])
 
+    def read_ref(self, session_id: str) -> dict:
+        """The live session dict -- **read-only**, do not mutate.
+
+        ``read`` deep-copies, which on a session whose ``history`` grows every
+        turn makes repeated reads O(turns^2). Callers that only inspect the
+        state (and go through ``session()`` to change it) should use this.
+        """
+        with self._session_lock(session_id):
+            return self._store[session_id]
+
     def delete(self, session_id: str) -> None:
         with self._global_lock:
             self._store.pop(session_id, None)
@@ -86,7 +96,11 @@ class LedgerService:
             except Exception:
                 raise
             else:
-                self._store[session_id] = copy.deepcopy(snapshot)
+                # The snapshot is already a private copy nobody else holds, so
+                # it can be installed directly; copying it a second time was
+                # pure overhead. On the exception path the store is left
+                # untouched, which is what makes the write-back atomic.
+                self._store[session_id] = snapshot
 
     # ------------------------------------------------------------------
     # Helpers

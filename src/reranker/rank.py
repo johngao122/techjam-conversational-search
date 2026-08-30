@@ -13,6 +13,7 @@ rating desc) and assembles the internals the confidence check needs:
 from __future__ import annotations
 
 import os
+from collections import OrderedDict
 
 from src.catalog.catalog import Catalog
 from src.catalog.loader import load_catalog_rows
@@ -115,6 +116,9 @@ def _rows_to_products(rows: list[tuple]) -> dict[str, Product]:
     return products
 
 
+_BUCKET_CACHE_MAX = 4096
+
+
 class Reranker:
     def __init__(
         self,
@@ -135,7 +139,12 @@ class Reranker:
         # Per-session resolved bucket key, keyed by opening message. The
         # coarse category is disclosed once (turn 1) and holds for the whole
         # session, so resolution is cached rather than re-run every turn.
-        self._bucket_cache: dict[str, list[str]] = {}
+        # Bounded: the key is arbitrary user text, one entry per session.
+        self._bucket_cache: OrderedDict[str, tuple[list[str], bool, bool]] = OrderedDict()
+        # Shared fallback pool. Materializing a fresh 50k list per unresolved
+        # session and pinning it in the cache is a lot of memory for a list
+        # nobody mutates.
+        self._all_asins: list[str] | None = None
 
     def rank_bucket(
         self,
@@ -171,8 +180,12 @@ class Reranker:
             resolved_exact = how == "exact"
             if not pool:
                 resolved = False
-                pool = list(self.constraint_index.attributes.keys())
+                if self._all_asins is None:
+                    self._all_asins = list(self.constraint_index.attributes.keys())
+                pool = self._all_asins
             self._bucket_cache[opening_message] = (pool, resolved, resolved_exact)
+            if len(self._bucket_cache) > _BUCKET_CACHE_MAX:
+                self._bucket_cache.popitem(last=False)
         else:
             pool, resolved, resolved_exact = cached
 

@@ -10,10 +10,12 @@ Public API:
 """
 
 from src.intent_router.router import (
+    attributes_of,
     build_search_key,
     detect_scenario,
     extract_attributes,
     parse_message,
+    warm_parser,
 )
 
-__all__ = ["build_search_key", "detect_scenario", "extract_attributes", "parse_message"]
+__all__ = ["attributes_of", "build_search_key", "detect_scenario", "extract_attributes", "parse_message", "warm_parser"]

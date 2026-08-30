@@ -23,7 +23,7 @@ from pathlib import Path
 
 from src.confidence import SessionLedger, popularity_top10, safe_decide
 from src.confidence.policy import DEFAULT_THETA, exposure, missing_topics
-from src.intent_router import build_search_key, detect_scenario, extract_attributes
+from src.intent_router import attributes_of, build_search_key, parse_message, warm_parser
 from src.intent_router.constraint_memory import ConstraintMemory
 from src.ledger.ledger import LedgerService
 from src.output import FollowUpContext, OutputFormatter
@@ -92,9 +92,12 @@ class Agent:
         self._theta = theta
         self._ledger = LedgerService()
         self._formatter = OutputFormatter()
-        # Eager build: FTS5 index + catalog load happen once, up front.
+        # Eager build: FTS5 index + catalog load happen once, up front. The
+        # router's vocab scan is warmed here too -- left lazy it fired inside
+        # the first respond() call and made turn 1 a multi-second outlier.
         self._reranker = build_reranker(self._catalog_path)
         self._popularity = popularity_top10(self._catalog_path)
+        warm_parser(self._catalog_path)
         self._mode = retrieval_mode()
         self._ask_policy = ask_policy()
         # Confidence state, keyed by session_id (parallel to the structured ledger).
@@ -131,13 +134,15 @@ class Agent:
         memory.add_message(user_message, turn)
 
         # -- 1. Intent Router --------------------------------------------------
-        session = self._ledger.read(session_id)
-        scenario = detect_scenario(user_message, session.get("history", []))
+        session = self._ledger.read_ref(session_id)
+        # One parse per turn: the intent and the attributes both come off it.
+        parsed = parse_message(user_message)
+        scenario = parsed.intent
 
         if scenario == "intent_override":
             self._ledger.set_intent(session_id, "buying")
         elif scenario == "boundary":
-            asked = self._ledger.read(session_id)["asked_attributes"]
+            asked = self._ledger.read_ref(session_id)["asked_attributes"]
             if asked:
                 last_asked = asked[-1]
                 # Remove the boundary attribute so it isn't searched.
@@ -148,7 +153,7 @@ class Agent:
             self._ledger.set_intent(session_id, scenario)
 
         # -- 2. Attribute Extraction ------------------------------------------
-        new_attrs = extract_attributes(user_message)
+        new_attrs = attributes_of(parsed)
         price = _parse_price_constraint(user_message)
 
         for attr, value in new_attrs.items():
@@ -167,7 +172,7 @@ class Agent:
         # -- 4. Update confidence ledger --------------------------------------
         # observe() reads the raw reply for override / boundary / exhaustion.
         conf_ledger.observe(user_message, turn)
-        session = self._ledger.read(session_id)
+        session = self._ledger.read_ref(session_id)
         constraints = self._collect_constraints(session)
         # `category` is a search-scoping signal pulled from the (possibly
         # vague) opening line, not a disclosed answer to a clarifying
@@ -183,7 +188,7 @@ class Agent:
             conf_ledger.reset_progress()
 
         # -- 5. Build search key + query --------------------------------------
-        session = self._ledger.read(session_id)
+        session = self._ledger.read_ref(session_id)
         if session.get("search_key"):
             search_key = session["search_key"]
         else:

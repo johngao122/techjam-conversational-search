@@ -7,6 +7,7 @@ from the catalog (rating_number desc, then average_rating desc).
 
 from __future__ import annotations
 
+import heapq
 from pathlib import Path
 
 from src.catalog.loader import load_catalog_rows
@@ -17,13 +18,18 @@ from src.confidence.policy import FIXED_ASK_ATTRIBUTE
 
 def popularity_top10(catalog_path: str | Path) -> list[str]:
     """Compute the popularity fallback list (top 10 parent_asin)."""
-    rows: list[tuple[float, float, str]] = []
-    for p in load_catalog_rows(str(catalog_path)):
-        rating_number = float(p.get("rating_number") or 0)
-        average_rating = float(p.get("average_rating") or 0)
-        rows.append((rating_number, average_rating, str(p["parent_asin"])))
-    rows.sort(key=lambda r: (r[0], r[1]), reverse=True)
-    return [asin for _, _, asin in rows[:10]]
+    rows = (
+        (
+            float(p.get("rating_number") or 0),
+            float(p.get("average_rating") or 0),
+            str(p["parent_asin"]),
+        )
+        for p in load_catalog_rows(str(catalog_path))
+    )
+    # Same key and same descending order as the full sort it replaces, but a
+    # partial selection: this only ever needs the top 10 of 50k.
+    top = heapq.nlargest(10, rows, key=lambda r: (r[0], r[1]))
+    return [asin for _, _, asin in top]
 
 
 def safe_decide(

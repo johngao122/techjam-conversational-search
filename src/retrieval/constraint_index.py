@@ -15,6 +15,7 @@ Weights are flat rather than IDF-scaled. IDF was measured worse here (0.962 vs
 
 from __future__ import annotations
 
+import heapq
 import math
 import os
 import re
@@ -27,12 +28,23 @@ TOKEN_WEIGHT = 0.5
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _WS_RE = re.compile(r"\s+")
+# True exactly when ``_WS_RE.sub(" ", text)`` would change ``text``: either a
+# run of two or more whitespace characters, or a single whitespace character
+# that is not a plain space (a tab, a newline, or Unicode space such as \xa0).
+_WS_COLLAPSE_NEEDED_RE = re.compile(r"\s\s|[^ \S]")
 
 # Structural punctuation is normalised to whitespace on BOTH sides of every
 # comparison. `details` flatten to "key: value" in the customer's constraint
 # but index as "key value" in the product text; without this every
 # details-derived match silently fails.
 _PUNCT_RE = re.compile(r"[:%]")
+
+# One pass instead of two. Substituting the punctuation and then collapsing
+# whitespace materializes an intermediate copy of every product's full text at
+# index-build time; folding both classes into a single character class gives a
+# byte-identical result (runs of punctuation and space collapse to one space
+# either way) for half the work.
+_FOLD_RE = re.compile(r"[:%\s]+")
 
 _LABEL_PREFIX_RE = re.compile(r"^\s*color\s*:\s*", re.IGNORECASE)
 
@@ -44,12 +56,22 @@ _BUDGET_RE = re.compile(r"^\s*budget\s+around\s*\$", re.IGNORECASE)
 
 def normalize(text: str) -> str:
     """Fold punctuation and whitespace so both sides compare identically."""
-    return _WS_RE.sub(" ", _PUNCT_RE.sub(" ", str(text).lower())).strip()
+    return _FOLD_RE.sub(" ", str(text).lower()).strip()
 
 
 def clean_constraint(value: str, limit: int = 180) -> str:
     """Mirror the trimming the simulator applies when it builds a constraint."""
-    return _WS_RE.sub(" ", str(value)).strip(" -;,.\t\n")[:limit].rstrip()
+    text = str(value)
+    # The collapse is a no-op for 99.9% of catalog attribute strings, and this
+    # runs ~470k times at index build. Testing whether the sub would change
+    # anything is far cheaper than always allocating a new string.
+    if text.isascii():
+        needed = "  " in text or any(c in text for c in "\t\n\r\v\f")
+    else:
+        needed = _WS_COLLAPSE_NEEDED_RE.search(text) is not None
+    if needed:
+        text = _WS_RE.sub(" ", text)
+    return text.strip(" -;,.\t\n")[:limit].rstrip()
 
 
 def flatten_attributes(product: dict) -> set[str]:
@@ -107,16 +129,20 @@ class ConstraintIndex:
         self.text: dict[str, str] = {}
         self.popularity: dict[str, float] = {}
         self._document_frequency: dict[str, int] = {}
+        # Only ``_exact_weight`` reads this, and only under IDF_WEIGHT=1.
+        # Building it unconditionally is a 50k-product tally nobody looks at.
+        use_idf = os.environ.get("IDF_WEIGHT", "") == "1"
         for product in rows:
             asin = str(product["parent_asin"])
             attributes = flatten_attributes(product)
             self.attributes[asin] = attributes
             self.text[asin] = searchable_text(product)
             self.popularity[asin] = math.log1p(float(product.get("rating_number") or 0))
-            for attribute in attributes:
-                self._document_frequency[attribute] = self._document_frequency.get(attribute, 0) + 1
+            if use_idf:
+                for attribute in attributes:
+                    self._document_frequency[attribute] = self._document_frequency.get(attribute, 0) + 1
         self._total = max(1, len(self.attributes))
-        self._use_idf = os.environ.get("IDF_WEIGHT", "") == "1"
+        self._use_idf = use_idf
 
     def _exact_weight(self, constraint: str) -> float:
         if not self._use_idf:
@@ -156,5 +182,10 @@ class ConstraintIndex:
         """
         popularity = self.popularity
         scores = {asin: self.score(asin, constraints) for asin in pool}
-        ordered = sorted(pool, key=lambda a: (-scores[a], -popularity.get(a, 0.0), a))
-        return ordered[:limit] if limit else ordered
+        key = lambda a: (-scores[a], -popularity.get(a, 0.0), a)
+        if limit:
+            # Same key, so ties break identically -- but a partial selection
+            # instead of a full sort. Matters most on the unresolved-bucket
+            # fallback, where the pool is the whole 50k catalog.
+            return heapq.nsmallest(limit, pool, key=key)
+        return sorted(pool, key=key)
