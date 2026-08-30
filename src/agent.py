@@ -26,7 +26,6 @@ from src.confidence.policy import DEFAULT_THETA, exposure, missing_topics
 from src.intent_router import attributes_of, build_search_key, parse_message, warm_parser
 from src.intent_router.constraint_memory import ConstraintMemory
 from src.ledger.ledger import LedgerService
-from src.ledger.llm_summarizer import LLMSummarizer
 from src.output import FollowUpContext, OutputFormatter
 from src.reranker import build_reranker, default_query
 from src.reranker.rank import retrieval_mode
