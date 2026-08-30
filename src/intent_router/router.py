@@ -4,18 +4,30 @@ import os
 
 from src.message_parser import MessageParser, ParsedMessage, load_catalog_vocab
 
-# Honour the evaluator's --catalog rather than hard-coding the path. The loader
-# is lru_cached by path, so this shares the parse with every other consumer.
+# Fallback only. ``warm_parser`` is the real entry point: ``Agent.__init__``
+# passes the constructor's catalog path so the router indexes the same file the
+# evaluator was pointed at, rather than whatever this env var happened to hold.
 _CATALOG_PATH = os.environ.get("CATALOG_PATH", "data/catalog.jsonl")
 _parser: MessageParser | None = None
 
 
-def _get_parser() -> MessageParser:
+def warm_parser(catalog_path: str | None = None) -> MessageParser:
+    """Build the vocab-backed parser eagerly.
+
+    The vocab scan costs seconds over a 50k-row catalog. Left lazy it landed
+    inside the first ``respond()`` call, turning turn 1 of session 1 into a
+    multi-second outlier; ``Agent.__init__`` calls this so the cost is paid at
+    construction alongside the FTS5 index build instead.
+    """
     global _parser
     if _parser is None:
-        categories, brands = load_catalog_vocab(_CATALOG_PATH)
+        categories, brands = load_catalog_vocab(catalog_path or _CATALOG_PATH)
         _parser = MessageParser(known_categories=categories, known_brands=brands)
     return _parser
+
+
+def _get_parser() -> MessageParser:
+    return warm_parser()
 
 
 def parse_message(message: str) -> ParsedMessage:
@@ -41,7 +53,16 @@ def extract_attributes(message: str) -> dict:
     ConstraintMemory, which is exactly where the dropped ``feature`` strings are
     now retained (see src/intent_router/constraint_memory.py).
     """
-    parsed = parse_message(message)
+    return attributes_of(parse_message(message))
+
+
+def attributes_of(parsed: ParsedMessage) -> dict:
+    """``extract_attributes`` for a message that has already been parsed.
+
+    ``Agent.respond`` needs both the intent and the attributes of the same
+    string; going through ``detect_scenario`` + ``extract_attributes`` parsed
+    it twice per turn.
+    """
     return {k: v for k, v in parsed.attributes.items() if k != "feature"}
 
 

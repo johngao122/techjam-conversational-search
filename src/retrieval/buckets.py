@@ -56,7 +56,32 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 # Minimum token overlap for the fuzzy rung to fire. Below this the match is
 # noise and searching the whole catalog is the safer degradation.
-_MIN_JACCARD = 0.34
+#
+# Scored as an overlap coefficient (overlap / min(|fragment|, |key|)), not a
+# Jaccard index (overlap / union): a bucket key is a short, structural
+# category name (e.g. "clothing dress"), while the message fragment is a
+# longer, descriptive phrase that legitimately carries extra adjectives
+# ("blue satin dress") the key was never going to contain. Jaccard's union
+# term punishes exactly those legitimate extra words, so a real match like
+# {blue, satin, dress} vs {clothing, dress} (overlap=1, union=4 -> 0.25)
+# would fail a Jaccard threshold that an overlap coefficient (1 / min(3, 2)
+# = 0.5) correctly recognises as "the key is contained in the fragment."
+_MIN_OVERLAP = 0.34
+
+
+def _singularize(token: str) -> str:
+    """Cheap plural stripping so e.g. "dress" overlaps catalog "dresses".
+
+    Not a real lemmatizer -- just enough to close the gap between how a
+    customer names an item ("a dress") and how the catalog's category taxonomy
+    names it ("Dresses"), which the exact/containment rungs never see because
+    they compare unstemmed strings.
+    """
+    if token.endswith("sses"):
+        return token[:-2]
+    if token.endswith("s") and not token.endswith("ss") and len(token) > 3:
+        return token[:-1]
+    return token
 
 
 def coarse_category(values: list[str] | None) -> str:
@@ -70,9 +95,51 @@ def coarse_category(values: list[str] | None) -> str:
     return " ".join(cleaned[-2:]) if cleaned else _FALLBACK_CATEGORY
 
 
-def _tokens(text: str, drop_filler: bool = False) -> set[str]:
+def _tokens(text: str, drop_filler: bool = False, singularize: bool = False) -> set[str]:
     found = set(_TOKEN_RE.findall(text.lower()))
-    return found - _FILLER if drop_filler else found
+    if drop_filler:
+        found -= _FILLER
+    if singularize:
+        found = {_singularize(tok) for tok in found}
+    return found
+
+
+def _ordered_tokens(text: str, drop_filler: bool = False, singularize: bool = False) -> list[str]:
+    """Like ``_tokens`` but preserves word order (a set can't)."""
+    tokens = _TOKEN_RE.findall(text.lower())
+    if drop_filler:
+        tokens = [t for t in tokens if t not in _FILLER]
+    if singularize:
+        tokens = [_singularize(t) for t in tokens]
+    return tokens
+
+
+def fragment_type_tokens(message: str) -> set[str]:
+    """The content words an opening message implies about item type.
+
+    Used by the bucket resolver's overlap rung, where matching against a
+    whole set of catalog-key tokens makes any of these words useful signal.
+    """
+    fragment = parse_category(message)
+    if not fragment:
+        return set()
+    return _tokens(fragment.lower(), drop_filler=True, singularize=True)
+
+
+def head_noun_token(message: str) -> str | None:
+    """The single word most likely to name the item's *type*, not its
+    attributes -- the last content word of the category fragment (English
+    noun phrases put the head noun last: "blue satin dress" -> "dress").
+
+    Used by the title-relevance gate, where OR-ing in every content word
+    (colors, materials) would readmit exactly the off-type matches the gate
+    exists to block -- e.g. a heel whose title also happens to say "satin".
+    """
+    fragment = parse_category(message)
+    if not fragment:
+        return None
+    tokens = _ordered_tokens(fragment.lower(), drop_filler=True, singularize=True)
+    return tokens[-1] if tokens else None
 
 
 def parse_category(message: str) -> str:
@@ -100,7 +167,9 @@ class BucketIndex:
             key = coarse_category(product.get("categories"))
             self._buckets[key.lower()].append(str(product["parent_asin"]))
         self._buckets = dict(self._buckets)
-        self._token_sets = {key: _tokens(key) for key in self._buckets}
+        self._token_sets = {
+            key: _tokens(key, singularize=True) for key in self._buckets
+        }
 
     def __len__(self) -> int:
         return len(self._buckets)
@@ -134,7 +203,9 @@ class BucketIndex:
             return max(contained, key=len), "containment"
 
         # Token overlap: word order changed or a connector was dropped.
-        fragment_tokens = _tokens(lowered, drop_filler=True)
+        # Singularized on both sides -- catalog category taxonomy is plural
+        # ("Dresses") while a customer names the item singular ("a dress").
+        fragment_tokens = _tokens(lowered, drop_filler=True, singularize=True)
         if fragment_tokens:
             best_key, best_score = None, 0.0
             for key, key_tokens in self._token_sets.items():
@@ -143,10 +214,10 @@ class BucketIndex:
                 overlap = len(fragment_tokens & key_tokens)
                 if not overlap:
                     continue
-                score = overlap / len(fragment_tokens | key_tokens)
+                score = overlap / min(len(fragment_tokens), len(key_tokens))
                 if score > best_score:
                     best_key, best_score = key, score
-            if best_key is not None and best_score >= _MIN_JACCARD:
-                return best_key, f"jaccard:{best_score:.2f}"
+            if best_key is not None and best_score >= _MIN_OVERLAP:
+                return best_key, f"overlap:{best_score:.2f}"
 
         return None, "unresolved"

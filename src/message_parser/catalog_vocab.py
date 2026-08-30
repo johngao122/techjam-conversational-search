@@ -18,6 +18,11 @@ from .vocab import EXCLUDED_CATEGORY_TERMS
 # a hyphen, including "t-shirts" (a top-10 category by product count).
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
+# Tokenizing with a positive match is measurably cheaper than substituting the
+# separators and splitting: the latter materializes a second copy of every
+# product's full searchable text just to throw it away.
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
 _SEARCH_FIELDS = ("title", "features", "description", "details", "categories", "store")
 
 # A single-word store name is only trusted as a brand signal if it's mostly
@@ -35,6 +40,11 @@ def _normalize(text: str) -> str:
 
 
 def _searchable_words(product: dict) -> set[str]:
+    return set(_TOKEN_RE.findall(_searchable_text(product)))
+
+
+def _searchable_text(product: dict) -> str:
+    """Lowercased concatenation of every searchable field of one product."""
     parts: list[str] = []
     for field in _SEARCH_FIELDS:
         value = product.get(field)
@@ -44,7 +54,7 @@ def _searchable_words(product: dict) -> set[str]:
             parts.extend(str(item) for item in value)
         elif value is not None:
             parts.append(str(value))
-    return set(_NON_ALNUM_RE.sub(" ", " ".join(parts).lower()).split())
+    return " ".join(parts).lower()
 
 
 def load_catalog_vocab(
@@ -63,11 +73,12 @@ def load_catalog_vocab(
     (this check doesn't extend to phrases); a few residual multi-word
     collisions with ordinary phrases (e.g. "next level", "watch band"
     happening to also be tiny store names) are a known limitation."""
+    rows = load_catalog_rows(str(catalog_path))
+
     categories: set[str] = set()
     store_counts: Counter[str] = Counter()
-    word_doc_freq: Counter[str] = Counter()
 
-    for product in load_catalog_rows(str(catalog_path)):
+    for product in rows:
         for cat in product.get("categories") or []:
             for part in str(cat).split(","):
                 cleaned = _normalize(part)
@@ -80,7 +91,15 @@ def load_catalog_vocab(
             if normalized_store:
                 store_counts[normalized_store] += 1
 
-        word_doc_freq.update(_searchable_words(product))
+    # Document frequency is consulted below for single-word store names only,
+    # so only those words are worth counting. Tallying every word in the
+    # catalog builds a 50k-key Counter whose vast majority is never read.
+    candidates = {name for name in store_counts if " " not in name}
+    word_doc_freq: Counter[str] = Counter()
+    if candidates:
+        findall = _TOKEN_RE.findall
+        for product in rows:
+            word_doc_freq.update(candidates.intersection(findall(_searchable_text(product))))
 
     brands: set[str] = set()
     for name, count in store_counts.items():

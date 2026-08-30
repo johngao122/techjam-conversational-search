@@ -16,17 +16,18 @@ tracks the exhaustion/override signals the confidence policy consumes.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from src.confidence import SessionLedger, popularity_top10, safe_decide
-from src.confidence.policy import DEFAULT_THETA, exposure
-from src.intent_router import build_search_key, detect_scenario, extract_attributes
+from src.confidence.policy import DEFAULT_THETA, exposure, missing_topics
+from src.intent_router import attributes_of, build_search_key, parse_message, warm_parser
 from src.intent_router.constraint_memory import ConstraintMemory
 from src.ledger.ledger import LedgerService
 from src.ledger.ollama_summarizer import OllamaSummarizer
-from src.output import OutputFormatter
+from src.output import FollowUpContext, OutputFormatter
 from src.reranker import build_reranker, default_query
 from src.reranker.rank import retrieval_mode
 from src.retrieval.retrieval import Retriever
@@ -73,6 +74,14 @@ def _parse_price_constraint(text: str) -> PriceConstraint | None:
     return None
 
 
+def ask_policy() -> str:
+    """Ship default is ``always_ask`` (the measured 0.968-TechScore champion,
+    see docs/project_description.md). ``ASK_POLICY=attribute_cycle`` swaps in
+    the specific-attribute-per-turn, never-repeat policy for A/B measurement;
+    see ``decide_specific_attribute``'s docstring for the tradeoff."""
+    return os.environ.get("ASK_POLICY", "always_ask").strip() or "always_ask"
+
+
 class Agent:
     """Full pipeline agent: Intent -> Ledger -> Retrieval/Rerank -> Confidence -> Output."""
 
@@ -85,7 +94,9 @@ class Agent:
         self._theta = theta
         self._ledger = LedgerService()
         self._formatter = OutputFormatter()
-        # Eager build: FTS5 index + catalog load happen once, up front.
+        # Eager build: FTS5 index + catalog load happen once, up front. The
+        # router's vocab scan is warmed here too -- left lazy it fired inside
+        # the first respond() call and made turn 1 a multi-second outlier.
         self._reranker = build_reranker(self._catalog_path)
         # Vector-capable retriever sharing the reranker's already-built in-memory
         # catalog (no second load). Enables BM25 + semantic retrieval as two
@@ -93,7 +104,9 @@ class Agent:
         # embedding cache / endpoint / numpy are unavailable.
         self._retriever = Retriever.with_vectors(self._reranker.catalog)
         self._popularity = popularity_top10(self._catalog_path)
+        warm_parser(self._catalog_path)
         self._mode = retrieval_mode()
+        self._ask_policy = ask_policy()
         # Confidence state, keyed by session_id (parallel to the structured ledger).
         self._sessions: dict[str, SessionLedger] = {}
         # Turn-1 opening message per session -- carries the verbatim coarse
@@ -106,7 +119,13 @@ class Agent:
         self._summaries: dict[str, dict] = {}
 
     def reset(self, session_id: str, user_profile: dict) -> None:
-        self._ledger.create(session_id, user_profile or {})
+        user_profile = user_profile or {}
+        self._ledger.create(session_id, user_profile)
+        self._ledger.add_user_preference(
+            session_id,
+            preference_tags=user_profile.get("preference_tags", []),
+            rating_style=user_profile.get("rating_style"),
+        )
         self._sessions[session_id] = SessionLedger(session_id=session_id)
         self._openings.pop(session_id, None)
         self._memory[session_id] = ConstraintMemory()
@@ -135,13 +154,15 @@ class Agent:
         memory.add_message(user_message, turn)
 
         # -- 1. Intent Router --------------------------------------------------
-        session = self._ledger.read(session_id)
-        scenario = detect_scenario(user_message, session.get("history", []))
+        session = self._ledger.read_ref(session_id)
+        # One parse per turn: the intent and the attributes both come off it.
+        parsed = parse_message(user_message)
+        scenario = parsed.intent
 
         if scenario == "intent_override":
             self._ledger.set_intent(session_id, "buying")
         elif scenario == "boundary":
-            asked = self._ledger.read(session_id)["asked_attributes"]
+            asked = self._ledger.read_ref(session_id)["asked_attributes"]
             if asked:
                 last_asked = asked[-1]
                 # Remove the boundary attribute so it isn't searched.
@@ -152,7 +173,7 @@ class Agent:
             self._ledger.set_intent(session_id, scenario)
 
         # -- 2. Attribute Extraction ------------------------------------------
-        new_attrs = extract_attributes(user_message)
+        new_attrs = attributes_of(parsed)
         price = _parse_price_constraint(user_message)
 
         for attr, value in new_attrs.items():
@@ -170,17 +191,9 @@ class Agent:
 
         # -- 3b. Update conversation summary ---------------------------------
         session = self._ledger.read(session_id)
-        current_summary = session.get("conversation_summary", "")
-        # Get last user message
-        history = session.get("history", [])
-        last_msg = ""
-        for msg in reversed(history):
-            if msg.get("role", "user") == "user":
-                last_msg = msg.get("content", "")
-                break
-        
+        current_summary = self._ledger.read(session_id).get("conversation_summary", "")
         summary = self._summarizer.summarize(
-            last_user_message=last_msg,
+            last_user_message=user_message,
             previous_summary=current_summary or "",
         )
         self._ledger.set_conversation_summary(session_id, summary)
@@ -196,7 +209,7 @@ class Agent:
         # -- 4. Update confidence ledger --------------------------------------
         # observe() reads the raw reply for override / boundary / exhaustion.
         conf_ledger.observe(user_message, turn)
-        session = self._ledger.read(session_id)
+        session = self._ledger.read_ref(session_id)
         constraints = self._collect_constraints(session)
         # `category` is a search-scoping signal pulled from the (possibly
         # vague) opening line, not a disclosed answer to a clarifying
@@ -226,12 +239,17 @@ class Agent:
         llm_search_key = session.get("llm_search_key") or {}
         vector_query = llm_search_key.get("_string")
         # BM25 uses SQLite which is not thread-safe across threads, so run sequentially.
+        print(f"[DEBUG] search_key: {search_key}")
         bm25_results = self._retriever.retrieve_bm25(search_key, top_k=top_k)
+        print(f"[DEBUG] bm25_results: {bm25_results}")
         vector_results = self._retriever.retrieve_vector(vector_query, top_k=top_k)
+        # vector_results = []
 
         # -- 6. Retrieval + Rerank + Decision (never raises) ------------------
+        pref_tags = session.get("user_preference", {}).get("preference_tags", [])
+        rating_style = session.get("user_preference", {}).get("rating_style")
         if self._mode == "legacy":
-            rank_fn = lambda: self._reranker.rank(query, constraints, top_k=top_k)
+            rank_fn = lambda: self._reranker.rank(query, constraints, top_k=top_k, preference_tags=pref_tags, rating_style=rating_style)
         else:
             # Bucket mode ranks against the verbatim constraint memory, not the
             # taxonomy-routed strings -- the disclosed strings are literal
@@ -243,14 +261,16 @@ class Agent:
                 if h.get("role") == "user"
             )
             rank_fn = lambda: self._reranker.rank_bucket(
-                opening, verbatim, top_k=top_k, transcript=transcript
+                opening, verbatim, top_k=top_k, transcript=transcript, preference_tags=pref_tags
             )
+        known_attrs = set(session.get("constraints", {}).keys())
         payload, recommendations = safe_decide(
             rank_fn,
             conf_ledger,
             self._popularity,
             theta=self._theta,
-            policy="always_ask",
+            policy=self._ask_policy,
+            known_attrs=known_attrs,
         )
         # Fuse bucket (category-scoped), BM25, and vector results via RRF.
         # recommendations = bm25_results
@@ -258,6 +278,26 @@ class Agent:
         recommendations = self._rrf([recommendations, bm25_results, vector_results])
         if payload.ask_attribute:
             conf_ledger.note_ask(payload.ask_attribute)
+
+        # Message-phrasing: every attribute not yet disclosed, bundled into
+        # one question (see missing_topics's docstring). Independent of
+        # payload.ask_attribute (the contract field, which stays "other"
+        # under always_ask). Recomputed fresh from known_attrs each turn --
+        # no per-session state, so a missing attribute keeps being asked
+        # about until it's actually known.
+        #
+        # known_attrs_for_missing (not known_attrs itself, to leave
+        # safe_decide/decide_specific_attribute's already-measured behaviour
+        # untouched): also counts budget as known when price_constraint is
+        # set. A dollar-sign-less disclosure ("under 50") bypasses extract_
+        # attributes()'s own budget regex (which requires a literal "$"),
+        # but _parse_price_constraint already understands it and the search
+        # layer already uses it -- the follow-up question shouldn't keep
+        # asking about something already effectively provided.
+        known_attrs_for_missing = set(known_attrs)
+        if session.get("price_constraint"):
+            known_attrs_for_missing.add("budget")
+        missing = missing_topics(known_attrs_for_missing) if payload.clarify else []
 
         # -- 7. Exposure gate + format ----------------------------------------
         # Reveal one candidate on turns 1-2, the full list from turn 3 (or once
@@ -267,7 +307,16 @@ class Agent:
             reveal = top_k
         else:
             reveal = exposure(turn, conf_ledger.exhausted, top_k)
-        return self._formatter.format(payload, recommendations[:reveal])
+        print(f"[DEBUG] turn={turn} reveal={reveal} mode={self._mode} exhausted={conf_ledger.exhausted} total_recs={len(recommendations)}")
+        followup_context = FollowUpContext(
+            scenario=scenario,
+            n_constraints_known=conf_ledger.n_constraints_known,
+            exhausted=conf_ledger.exhausted,
+            turn=turn,
+            override_seen=conf_ledger.override_seen,
+            missing_attrs=tuple(missing),
+        )
+        return self._formatter.format(payload, recommendations[:reveal], context=followup_context)
 
     # ------------------------------------------------------------------
     # Helpers
