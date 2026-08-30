@@ -10,7 +10,7 @@ Retrieval/rerank failures fall back to a popularity ordering so ``respond``
 never raises and always emits recommendations.
 
 The :class:`~src.ledger.ledger.LedgerService` tracks structured
-constraints/turn/history; a parallel :class:`~src.confidence.session_ledger.SessionLedger`
+constraints/turn; a parallel :class:`~src.confidence.session_ledger.SessionLedger`
 tracks the exhaustion/override signals the confidence policy consumes.
 """
 
@@ -169,13 +169,7 @@ class Agent:
             with self._ledger.session(session_id) as s:
                 s["price_constraint"] = {"operator": price.operator, "amount": price.amount}
 
-        # -- 3. Update history -------------------------------------------------
-        with self._ledger.session(session_id) as s:
-            s.setdefault("history", []).append(
-                {"turn": turn, "role": "user", "content": user_message}
-            )
-
-        # -- 4. Update confidence ledger --------------------------------------
+        # -- 3. Update confidence ledger --------------------------------------
         # observe() reads the raw reply for override / boundary / exhaustion.
         conf_ledger.observe(user_message, turn)
         session = self._ledger.read_ref(session_id)
@@ -212,13 +206,8 @@ class Agent:
             # taxonomy-routed strings -- the disclosed strings are literal
             # slices of the target's metadata and match exactly within a bucket.
             verbatim = memory.constraints
-            transcript = " ".join(
-                str(h.get("content", ""))
-                for h in session.get("history", [])
-                if h.get("role") == "user"
-            )
             rank_fn = lambda: self._reranker.rank_bucket(
-                opening, verbatim, top_k=top_k, transcript=transcript, preference_tags=pref_tags
+                opening, verbatim, top_k=top_k, preference_tags=pref_tags
             )
         known_attrs = set(session.get("constraints", {}).keys())
         payload, recommendations = safe_decide(
