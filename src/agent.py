@@ -191,11 +191,12 @@ class Agent:
 
         # -- 3b. Update conversation summary ---------------------------------
         session = self._ledger.read(session_id)
-        current_summary = self._ledger.read(session_id).get("conversation_summary", "")
-        summary = self._summarizer.summarize(
-            last_user_message=user_message,
-            previous_summary=current_summary or "",
-        )
+        # current_summary = self._ledger.read(session_id).get("conversation_summary", "")
+        # summary = self._summarizer.summarize(
+        #     last_user_message=user_message,
+        #     previous_summary=current_summary or "",
+        # )
+        summary = ""
         self._ledger.set_conversation_summary(session_id, summary)
         # Store in cross-session cache keyed by user_id.
         user_id = session.get("user_profile", {}).get("user_id")
@@ -261,7 +262,7 @@ class Agent:
                 if h.get("role") == "user"
             )
             rank_fn = lambda: self._reranker.rank_bucket(
-                opening, verbatim, top_k=top_k, transcript=transcript, preference_tags=pref_tags
+                opening, verbatim, top_k=top_k, transcript=transcript, preference_tags=pref_tags, rating_style=rating_style
             )
         known_attrs = set(session.get("constraints", {}).keys())
         payload, recommendations = safe_decide(
@@ -275,7 +276,7 @@ class Agent:
         # Fuse bucket (category-scoped), BM25, and vector results via RRF.
         # recommendations = bm25_results
         # recommendations = vector_results
-        recommendations = self._rrf([recommendations, bm25_results, vector_results])
+        # recommendations = self._rrf([recommendations, bm25_results, vector_results])
         if payload.ask_attribute:
             conf_ledger.note_ask(payload.ask_attribute)
 

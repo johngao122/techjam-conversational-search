@@ -107,8 +107,8 @@ class ConstraintStrategy:
     def __init__(self, constraint_index: ConstraintIndex) -> None:
         self._constraint_index = constraint_index
 
-    def rank(self, pool: list[str], prepared: PreparedConstraints, top_k: int) -> list[str]:
-        return self._constraint_index.rank(pool, prepared, top_k)
+    def rank(self, pool: list[str], prepared: PreparedConstraints, top_k: int, rating_style: str | None = None) -> list[str]:
+        return self._constraint_index.rank(pool, prepared, top_k, rating_style=rating_style)
 
     def score(self, asin: str, prepared: PreparedConstraints) -> float:
         return self._constraint_index.score(asin, prepared)
@@ -171,7 +171,7 @@ class BucketPipeline:
 
         self.last_prepared = prepared
         self.last_pool_size = len(pool)
-        ranked = self._constraint.rank(pool, prepared, request.top_k)
+        ranked = self._constraint.rank(pool, prepared, request.top_k, rating_style=request.rating_style)
         return RetrievalResult(
             candidates=ranked,
             resolved=bucket_result.resolved,
