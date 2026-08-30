@@ -113,8 +113,6 @@ class Agent:
         self._openings: dict[str, str] = {}
         # Cumulative verbatim constraint memory (evict-on-value-conflict).
         self._memory: dict[str, ConstraintMemory] = {}
-        # LLM-based conversation summarizer.
-        self._summarizer = LLMSummarizer()
         # Cross-session summary storage: keyed by user_id from user_profile.
         self._summaries: dict[str, dict] = {}
 
