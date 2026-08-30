@@ -29,6 +29,7 @@ def _empty_entry(session_id: str, user_profile: dict) -> dict:
         "soft_preferences": [],
         "asked_attributes": [],
         "search_key": {},
+        "llm_search_key": {},
         "conversation_summary": "",
     }
 
@@ -141,6 +142,10 @@ class LedgerService:
     def set_search_key(self, session_id: str, search_key: dict[str, list]) -> None:
         with self._session_lock(session_id):
             self._store[session_id]["search_key"] = search_key
+
+    def set_llm_search_key(self, session_id: str, search_key: dict[str, list]) -> None:
+        with self._session_lock(session_id):
+            self._store[session_id]["llm_search_key"] = search_key
 
     def next_unasked_attribute(self, session_id: str) -> str | None:
         with self._session_lock(session_id):

@@ -9,6 +9,9 @@ import uuid
 from collections import defaultdict
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from src.agent import Agent
 
 
