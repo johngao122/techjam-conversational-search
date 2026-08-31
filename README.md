@@ -118,9 +118,6 @@ python3 -m scripts.benchmark_latency
 
 # Interactive session — type the customer's side yourself
 python3 scripts/try_agent.py
-
-# Test suite
-python3 -m pytest -q      # or: python3 -m unittest discover -s tests -q
 ```
 
 Expected headline output: `hit_rate_at_10 1.0`, `mrr ≈ 0.968`, `mttc ≈ 2.07`,
@@ -155,12 +152,6 @@ reproducible from a frozen commit.
    shares nothing with the catalogue has nothing to fall back on. *Next:*
    revisit a semantic layer that is gated to only fire when the lexical path is
    weak, rather than always contributing.
-
-5. **Packaging.** `ollama` was missing from `requirements.txt` (fixed here); the
-   summariser it feeds is disabled in the response path and the import should be
-   made lazy. Our local `evaluator/local_evaluator.py` also carries small edits
-   (a `dotenv` import, verbose logging) — the official run uses the frozen
-   evaluator, so local and official scores should be reconciled against that.
 
 ---
 
