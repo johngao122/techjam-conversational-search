@@ -34,6 +34,8 @@ from src.retrieval.hybrid import HybridRetriever
 from src.retrieval.retrieval import Retriever
 from src.retrieval.strategies import prepare_constraints
 
+_DEBUG = os.environ.get("AGENT_DEBUG", "").strip().lower() in {"1", "true", "yes"}
+
 
 @dataclass
 class PriceConstraint:
@@ -246,14 +248,17 @@ class Agent:
         pref_tags = session.get("user_preference", {}).get("preference_tags", [])
         rating_style = session.get("user_preference", {}).get("rating_style")  
         # BM25 uses SQLite which is not thread-safe across threads, so run sequentially.
-        print(f"[DEBUG] search_key: {search_key}")
+        if _DEBUG:
+            print(f"[DEBUG] search_key: {search_key}")
         bm25_results = self._retriever.retrieve_bm25(search_key, top_k=top_k, preference_tags=pref_tags)
-        print(f"[DEBUG] bm25_results: {bm25_results}")
+        if _DEBUG:
+            print(f"[DEBUG] bm25_results: {bm25_results}")
         if scenario == "browsing" and self._retriever.has_vectors:
             vector_results = self._retriever.retrieve_vector(vector_query, top_k=top_k)
         else:
             vector_results = []
-        print(f"[DEBUG] intent={scenario} vector_results={len(vector_results)}")
+        if _DEBUG:
+            print(f"[DEBUG] intent={scenario} vector_results={len(vector_results)}")
 
         # -- 6. Retrieval + Rerank + Decision (never raises) ------------------
         if self._mode == "legacy":
@@ -344,7 +349,8 @@ class Agent:
             reveal = top_k
         else:
             reveal = exposure(turn, conf_ledger.exhausted, top_k)
-        print(f"[DEBUG] turn={turn} reveal={reveal} mode={self._mode} exhausted={conf_ledger.exhausted} total_recs={len(recommendations)}")
+        if _DEBUG:
+            print(f"[DEBUG] turn={turn} reveal={reveal} mode={self._mode} exhausted={conf_ledger.exhausted} total_recs={len(recommendations)}")
         followup_context = FollowUpContext(
             scenario=scenario,
             n_constraints_known=conf_ledger.n_constraints_known,
