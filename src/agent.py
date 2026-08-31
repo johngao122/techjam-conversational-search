@@ -258,9 +258,14 @@ class Agent:
         if self._mode == "legacy":
             rank_fn = lambda: self._reranker.rank(query, constraints, top_k=top_k, preference_tags=pref_tags, rating_style=rating_style)
         elif scenario == "browsing" and vector_results:
-            # Browsing: RRF-fuse BM25 + vector before reranking, then score
-            # directly via score_by_constraints (bypasses BucketPipeline retrieval).
-            fused = self._rrf([bm25_results, vector_results])
+            # Browsing: merge BM25 + vector into a deduplicated pool, then
+            # let score_by_constraints own the ordering entirely.
+            seen: set[str] = set()
+            fused: list[str] = []
+            for asin in bm25_results + vector_results:
+                if asin not in seen:
+                    seen.add(asin)
+                    fused.append(asin)
             prepared = prepare_constraints(memory.constraints)
             rank_fn = lambda: self._reranker.score_by_constraints(
                 fused, prepared, pool_size=len(fused),
@@ -327,6 +332,7 @@ class Agent:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
 
     @staticmethod
     def _union_search_key(previous: dict[str, list], current: dict[str, list]) -> dict[str, list]:
