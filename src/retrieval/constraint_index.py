@@ -136,10 +136,7 @@ def prepare(constraint: str) -> tuple[str, tuple[str, ...]]:
 
 
 class ConstraintIndex:
-    """Per-product attribute sets and text, plus the popularity prior.
-
-    Includes an inverted index for O(1) lookup of products matching a constraint.
-    """
+    """Per-product attribute sets and text, plus the popularity prior."""
 
     def __init__(self, rows) -> None:
         self.attributes: dict[str, set[str]] = {}
