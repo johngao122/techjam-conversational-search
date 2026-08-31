@@ -199,10 +199,11 @@ def _policy() -> str:
 class ConstraintMemory:
     """Per-session ordered constraint list under evict-on-value-conflict."""
 
-    def __init__(self) -> None:
+    def __init__(self, policy: str | None = None) -> None:
         self._constraints: list[str] = []
         self._seen: set[str] = set()
-        self._policy = _policy()
+        # ``policy`` comes from AgentConfig; ``None`` falls back to OVERRIDE_POLICY.
+        self._policy = policy or _policy()
 
     def add_message(self, message: str, turn: int) -> list[str]:
         """Extract and integrate a message's constraints. Returns the new ones."""

@@ -16,19 +16,18 @@ tracks the exhaustion/override signals the confidence policy consumes.
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from src.config import AgentConfig
 from src.confidence import SessionLedger, popularity_top10, safe_decide
-from src.confidence.policy import DEFAULT_THETA, exposure, missing_topics
+from src.confidence.policy import exposure, missing_topics
 from src.intent_router import attributes_of, build_search_key, parse_message, warm_parser
 from src.intent_router.constraint_memory import ConstraintMemory
 from src.ledger.ledger import LedgerService
 from src.output import FollowUpContext, OutputFormatter
 from src.reranker import build_reranker, default_query
-from src.reranker.rank import retrieval_mode
 
 
 @dataclass
@@ -72,34 +71,37 @@ def _parse_price_constraint(text: str) -> PriceConstraint | None:
     return None
 
 
-def ask_policy() -> str:
-    """Ship default is ``always_ask`` (the measured 0.968-TechScore champion,
-    see docs/project_description.md). ``ASK_POLICY=attribute_cycle`` swaps in
-    the specific-attribute-per-turn, never-repeat policy for A/B measurement;
-    see ``decide_specific_attribute``'s docstring for the tradeoff."""
-    return os.environ.get("ASK_POLICY", "always_ask").strip() or "always_ask"
-
-
 class Agent:
-    """Full pipeline agent: Intent -> Ledger -> Retrieval/Rerank -> Confidence -> Output."""
+    """Full pipeline agent: Intent -> Ledger -> Retrieval/Rerank -> Confidence -> Output.
+
+    Every swappable mechanism (parser, retrieval core, ask policy, exposure
+    gate, override policy, IDF, theta) lives on ``config``. Pass an
+    :class:`~src.config.AgentConfig` explicitly, or leave it ``None`` to build
+    one from the environment (:meth:`AgentConfig.from_env`) -- which reproduces
+    the shipped defaults when nothing is set.
+    """
 
     def __init__(
         self,
         catalog_path: str | Path = "data/catalog.jsonl",
-        theta: float = DEFAULT_THETA,
+        config: AgentConfig | None = None,
+        theta: float | None = None,
     ) -> None:
         self._catalog_path = str(catalog_path)
-        self._theta = theta
+        self._config = config or AgentConfig.from_env()
+        # Back-compat: an explicit ``theta=`` arg still wins over the config.
+        self._theta = theta if theta is not None else self._config.theta
+        self._mode = self._config.retrieval_mode
+        self._ask_policy = self._config.ask_policy
         self._ledger = LedgerService()
         self._formatter = OutputFormatter()
         # Eager build: FTS5 index + catalog load happen once, up front. The
         # router's vocab scan is warmed here too -- left lazy it fired inside
         # the first respond() call and made turn 1 a multi-second outlier.
-        self._reranker = build_reranker(self._catalog_path)
+        self._reranker = build_reranker(self._catalog_path, idf_weight=self._config.idf_weight)
         self._popularity = popularity_top10(self._catalog_path)
-        warm_parser(self._catalog_path)
-        self._mode = retrieval_mode()
-        self._ask_policy = ask_policy()
+        # kind="llm" raises RuntimeError here if the DOCKER_MODEL_* vars are unset.
+        warm_parser(self._catalog_path, kind=self._config.parser)
         # Confidence state, keyed by session_id (parallel to the structured ledger).
         self._sessions: dict[str, SessionLedger] = {}
         # Turn-1 opening message per session -- carries the verbatim coarse
@@ -118,7 +120,7 @@ class Agent:
         )
         self._sessions[session_id] = SessionLedger(session_id=session_id)
         self._openings.pop(session_id, None)
-        self._memory[session_id] = ConstraintMemory()
+        self._memory[session_id] = ConstraintMemory(policy=self._config.override_policy)
 
     def respond(
         self,
@@ -136,7 +138,9 @@ class Agent:
         opening = self._openings.setdefault(session_id, user_message)
         # Accumulate verbatim disclosed constraints (with value-conflict
         # supersession) before ranking this turn.
-        memory = self._memory.setdefault(session_id, ConstraintMemory())
+        memory = self._memory.setdefault(
+            session_id, ConstraintMemory(policy=self._config.override_policy)
+        )
         memory.add_message(user_message, turn)
 
         # -- 1. Intent Router --------------------------------------------------
@@ -248,7 +252,13 @@ class Agent:
         if self._mode == "legacy":
             reveal = top_k
         else:
-            reveal = exposure(turn, conf_ledger.exhausted, top_k)
+            reveal = exposure(
+                turn,
+                conf_ledger.exhausted,
+                top_k,
+                enabled=self._config.exposure_gate,
+                release=self._config.release_turn,
+            )
         followup_context = FollowUpContext(
             scenario=scenario,
             n_constraints_known=conf_ledger.n_constraints_known,
