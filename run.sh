@@ -135,4 +135,60 @@ case "${1:-eval}" in
             python3 -c "import json; d=json.load(open('$f')); print(f\"score={d.get('recommended_technical_score','?'):.4f}  hit={d.get('hit_rate_at_10','?')}  mrr={d.get('mrr','?')}  mttc={d.get('mttc','?')}\")"
         done
         ;;
+    # ========================
+    # Fresh (unseen) dataset generation + stress
+    # ========================
+    # NUM_SAMPLES and SEED are optional env vars, e.g.:
+    #   NUM_SAMPLES=50 SEED=20260831 ./run.sh gen-dataset
+    gen-dataset)
+        echo "Generating a fresh dataset (unseen parent_asins, not public_set.jsonl targets)..."
+        python3 scripts/generate_paraphrase_dataset.py \
+            --output data/paraphrase_set.jsonl \
+            ${NUM_SAMPLES:+--num-samples "$NUM_SAMPLES"} \
+            ${SEED:+--seed "$SEED"}
+        ;;
+    stress-fresh)
+        echo "Running paraphrase stress tests on a freshly generated dataset (none / mild / aggressive)..."
+        python3 scripts/paraphrase_stress.py --regenerate --dataset data/paraphrase_set.jsonl \
+            ${NUM_SAMPLES:+--num-samples "$NUM_SAMPLES"} ${SEED:+--seed "$SEED"} \
+            --level none --output results_stress_fresh_none.json
+        echo "Level none done -> results_stress_fresh_none.json"
+
+        python3 scripts/paraphrase_stress.py --dataset data/paraphrase_set.jsonl \
+            --level mild --output results_stress_fresh_mild.json
+        echo "Level mild done -> results_stress_fresh_mild.json"
+
+        python3 scripts/paraphrase_stress.py --dataset data/paraphrase_set.jsonl \
+            --level aggressive --output results_stress_fresh_aggressive.json
+        echo "Level aggressive done -> results_stress_fresh_aggressive.json"
+
+        echo ""
+        echo "=== Fresh-dataset stress test summary ==="
+        for f in results_stress_fresh_none.json results_stress_fresh_mild.json results_stress_fresh_aggressive.json; do
+            echo -n "$f: "
+            python3 -c "import json; d=json.load(open('$f')); print(f\"score={d.get('recommended_technical_score','?'):.4f}  hit={d.get('hit_rate_at_10','?')}  mrr={d.get('mrr','?')}  mttc={d.get('mttc','?')}\")"
+        done
+        ;;
+    hybrid-stress-fresh)
+        echo "Running HYBRID paraphrase stress tests on a freshly generated dataset (none / mild / aggressive)..."
+        RETRIEVAL_MODE=hybrid python3 scripts/paraphrase_stress.py --regenerate --dataset data/paraphrase_set.jsonl \
+            ${NUM_SAMPLES:+--num-samples "$NUM_SAMPLES"} ${SEED:+--seed "$SEED"} \
+            --level none --output results_hybrid_stress_fresh_none.json
+        echo "Level none done -> results_hybrid_stress_fresh_none.json"
+
+        RETRIEVAL_MODE=hybrid python3 scripts/paraphrase_stress.py --dataset data/paraphrase_set.jsonl \
+            --level mild --output results_hybrid_stress_fresh_mild.json
+        echo "Level mild done -> results_hybrid_stress_fresh_mild.json"
+
+        RETRIEVAL_MODE=hybrid python3 scripts/paraphrase_stress.py --dataset data/paraphrase_set.jsonl \
+            --level aggressive --output results_hybrid_stress_fresh_aggressive.json
+        echo "Level aggressive done -> results_hybrid_stress_fresh_aggressive.json"
+
+        echo ""
+        echo "=== HYBRID fresh-dataset stress test summary ==="
+        for f in results_hybrid_stress_fresh_none.json results_hybrid_stress_fresh_mild.json results_hybrid_stress_fresh_aggressive.json; do
+            echo -n "$f: "
+            python3 -c "import json; d=json.load(open('$f')); print(f\"score={d.get('recommended_technical_score','?'):.4f}  hit={d.get('hit_rate_at_10','?')}  mrr={d.get('mrr','?')}  mttc={d.get('mttc','?')}\")"
+        done
+        ;;
 esac
