@@ -244,7 +244,7 @@ class Agent:
             rank_fn = lambda: self._reranker.rank(query, constraints, top_k=top_k, preference_tags=pref_tags, rating_style=rating_style)
         elif self._mode == "hybrid":
             from src.reranker.types import RankResult
-            _constraint_query = HybridRetriever.build_constraint_query(session, opening_message=opening)
+            _constraint_query = HybridRetriever.build_constraint_query(session, opening_message=opening) if scenario != "intent_override" else ""
             from src.retrieval.constraint_index import prepare
             verbatim_constraints = memory.constraints
             # Apply constraint normalization just-in-time

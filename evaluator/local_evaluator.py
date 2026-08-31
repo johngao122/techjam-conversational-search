@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import random
 import re
 import statistics
@@ -11,6 +12,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
+
+logging.basicConfig(level=logging.DEBUG, format="%(name)s | %(message)s")
+logging.getLogger("src.retrieval.strategies").setLevel(logging.DEBUG)
 
 from src.agent import Agent
 
@@ -222,6 +226,7 @@ def evaluate(
     catalog_ids: set[str],
     categories: dict[str, list[str]],
     products: dict[str, dict],
+    verbose: bool = False,
 ) -> dict:
     sessions: list[dict] = []
     total_prompt_tokens = 0
@@ -269,6 +274,14 @@ def evaluate(
                 user_message, boundary_used = customer_reply(
                     effective_sample, response.get("ask_attribute"), disclosed, boundary_used
                 )
+        # Log ledger state if verbose
+        if verbose:
+            print(f"\n{'='*60}")
+            print(f"LEDGER for sample {sample['sample_id']} (session {session_id}):")
+            print(f"{'='*60}")
+            agent._ledger.dump(session_id)
+            print(f"{'='*60}\n")
+
         sessions.append({
             "sample_id": sample["sample_id"],
             "scenario_type": sample["scenario_type"],

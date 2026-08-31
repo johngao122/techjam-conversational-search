@@ -283,27 +283,47 @@ class HybridRetriever:
 
     @staticmethod
     def build_constraint_query(session: dict, opening_message: str = "") -> str:
-        """Build a semantic query string from the conversation history.
+        """Build a semantic vector query from structured session state.
 
-        Uses the accumulated user message history as the vector query — raw
-        natural language captures semantic intent better than structured
-        attribute strings (the embedding space is built from title/categories/
-        description, not features/details, so attribute keywords like "alloy"
-        have low semantic similarity).
+        Uses intent + current constraints rather than raw message history.
+        The vector index embeds title/categories/description — not attributes —
+        so the query should match that register. History concatenation was
+        replaced because attribute-dump turns ("polyester; Cotton,Spandex") are
+        useless in the embedding space and stale pre-override turns corrupt intent.
 
-        Falls back to the opening message (category fragment) when history is
-        empty (turn 1 before history is populated).
+        Intent is mapped to natural language phrases the embedding space
+        understands. boundary/intent_override carry no useful phrase.
         """
-        history = session.get("history") or []
-        user_turns = [
-            str(h.get("content", ""))
-            for h in history
-            if h.get("role") == "user" and h.get("content")
-        ]
-        if user_turns:
-            return " ".join(user_turns).strip()
+        _INTENT_PHRASES = {
+            "buying": "looking to buy",
+            "browsing": "looking for",
+        }
 
-        # Turn 1: history not yet populated — use opening message category fragment
+        parts: list[str] = []
+
+        # Intent phrase — only for intents that map to natural language
+        intent = (session.get("intent") or "").strip()
+        intent_phrase = _INTENT_PHRASES.get(intent, "")
+        if intent_phrase:
+            parts.append(intent_phrase)
+
+        # Category (strongest signal — matches taxonomy path embedded in index)
+        constraints = session.get("constraints") or {}
+        category = constraints.get("category") or []
+        if category:
+            parts.append(category[0])
+
+        # Remaining constraint values (material, color, style etc.)
+        for attr, values in constraints.items():
+            if attr == "category":
+                continue
+            if values:
+                parts.append(values[0])
+
+        if parts:
+            return " ".join(parts).strip()
+
+        # Turn 1 fallback: no constraints yet — use opening message category fragment
         if opening_message:
             from src.retrieval.buckets import parse_category
             fragment = parse_category(opening_message).strip()
