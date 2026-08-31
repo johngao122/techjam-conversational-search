@@ -22,12 +22,10 @@ from src.output.followup import (
     build_recommend_message,
 )
 
-# Legacy fallback: static phrasing per allowed ask_attribute (contract enum),
-# used only when no FollowUpContext is supplied (keeps existing callers
-# working). In the live path ask_attribute is always "other" (see
-# src/confidence/policy.py), so entries beyond "other" are effectively dead
-# code today -- kept for the alternate `decide()` policy and any caller that
-# still wants attribute-keyed phrasing.
+# Legacy fallback: static phrasing per ask_attribute, used only when no
+# FollowUpContext is supplied. In the live path ask_attribute is always
+# "other" (see src/confidence/policy.py); other entries are kept for the
+# alternate `decide()` policy.
 _QUESTION_BY_ATTRIBUTE = {
     "category": "What type of item are you looking for?",
     "material": "Do you have a material preference?",

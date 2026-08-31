@@ -27,11 +27,9 @@ MATERIALS = (
     "bamboo", "microfiber", "twill", "jersey", "terry", "flannel",
     "nubuck", "sherpa", "modal", "tulle", "sequin", "sheepskin",
     "neoprene", "ripstop",
-    # Jewelry/accessory materials + fabric-blend/technical-fabric terms --
-    # this catalog covers Jewelry as well as Clothing, and blends are common
-    # (all kept at >=80 occurrences in data/catalog.jsonl). Multi-word
-    # variants ordered before their shorter substring, same reasoning as
-    # STYLE_KEYWORDS below.
+    # Jewelry/accessory materials + fabric-blend terms (kept at >=80
+    # occurrences). Multi-word variants ordered before their shorter
+    # substring, same reasoning as STYLE_KEYWORDS below.
     "stainless steel", "sterling silver", "cotton blend", "polyester blend",
     "wool blend", "organic cotton", "pu leather", "faux suede",
     "moisture wicking", "breathable mesh", "stretch fabric", "quick dry",
@@ -58,13 +56,9 @@ SIZE_LETTER_RE = re.compile(r"\bsize[:\s]*(x{0,3}s|x{0,3}l|m)\b", re.I)
 SIZE_BARE_LETTER_RE = re.compile(r"\b(xxs|xs|small|medium|large|xl|xxl|xxxl)\b", re.I)
 SIZE_WIDTH_RE = re.compile(r"\b(wide|narrow|regular)\s*width\b", re.I)
 SIZE_PHRASES = ("one size", "big and tall")
-# Raw catalog text labels physical dimensions the same way it labels a real
-# garment/shoe size -- both literally say "Size: N" -- e.g. an earring's
-# "Size: 2.5'' in length" vs a shoe's "Size 10". Checked against
-# data/catalog.jsonl: a unit marker immediately after the number reliably
-# separates the two (886 dimension/measurement-chart cases with a marker,
-# 5486 real garment/shoe sizes without one). No customer says "size 9
-# inches" for a shoe, so this costs nothing on genuine size disclosures.
+# A unit marker immediately after the number separates a physical dimension
+# (an earring's "Size: 2.5'' in length") from a real garment/shoe size
+# ("Size 10"). No customer says "size 9 inches" for a shoe.
 SIZE_UNIT_MARKER_RE = re.compile(
     r"^\s*(?:''|\"|in\b|inch|cm\b|mm\b|oz\b|ounce|lbs?\b|pound|ft\b|feet|gauge)", re.I
 )
@@ -86,17 +80,15 @@ STYLE_KEYWORDS = (
     "zip-up", "zip up", "loose fit", "loose", "fitted", "straight leg",
     "skinny", "bootcut", "unisex", "chic", "retro", "plus size", "boho",
     "bohemian", "minimalist", "petite", "maternity", "streetwear",
-    # Pattern/print descriptors -- no dedicated "pattern" slot exists in the
-    # API contract's allowed attributes, so these live under style (a print
-    # is a visual style trait). Multi-word variants ordered before their
-    # shorter substring so e.g. "polka dot" wins over bare "polka" when a
-    # message matches both (see _all_keyword_hits: first hit is the value).
+    # Pattern/print descriptors live under style (no dedicated "pattern"
+    # slot in the contract). Multi-word variants ordered before their shorter
+    # substring so e.g. "polka dot" wins over bare "polka".
     "polka dot", "polka", "leopard print", "leopard", "graphic print",
     "graphic", "solid color", "solid", "tie dye", "tie-dye", "striped",
     "stripe", "floral", "plaid", "camouflage", "camo", "paisley",
     "embroidered", "printed",
-    # Shoe heel type/height -- no dedicated slot in the contract; a heel
-    # style is a shoe fit/style trait, same reasoning as pattern above.
+    # Shoe heel type/height -- a heel style is a shoe fit/style trait,
+    # same reasoning as pattern above.
     "kitten heel", "block heel", "chunky heel", "wedge heel", "high heel",
     "low heel", "stiletto", "platform", "wedge", "flat", "heel",
 )
@@ -155,12 +147,9 @@ GENERIC_SINGLE_WORD_BLOCKLIST = {
     "options",
 }
 MIN_SINGLE_WORD_VOCAB_LEN = 4
-# Brand needs a stricter bar than category: this catalog is full of small
-# private-label sellers whose store name is coincidentally an ordinary
-# marketing adjective ("Comfy", "Sole", "Worth", "Match"), which show up
-# constantly in real Amazon feature/description text. A wrong brand guess
-# actively harms retrieval (excludes the right product); a missed real
-# short brand name is neutral (the raw word is still kept in `keywords`).
+# Brand needs a stricter bar than category: many store names are ordinary
+# marketing adjectives ("Comfy", "Sole"). A wrong brand guess harms
+# retrieval; a missed short brand name is neutral (kept in `keywords`).
 MIN_SINGLE_WORD_BRAND_LEN = 6
 
 # Customers commonly type these as one merged word; catalog categories store

@@ -1,17 +1,9 @@
 """Full pipeline agent.
 
-Wires the components into the flow described in ``docs/diagrams/architecture.md``::
-
-    Intent Router -> Ledger -> Retrieval+Reranker -> Confidence (decision) -> Output
-
-Every turn returns a top-10 recommendation list; the confidence component (the
-decision gate) only decides whether to *also* attach a clarifying question.
-Retrieval/rerank failures fall back to a popularity ordering so ``respond``
-never raises and always emits recommendations.
-
-The :class:`~src.ledger.ledger.LedgerService` tracks structured
-constraints/turn; a parallel :class:`~src.confidence.session_ledger.SessionLedger`
-tracks the exhaustion/override signals the confidence policy consumes.
+Flow: Intent Router -> Ledger -> Retrieval+Reranker -> Confidence (decision) -> Output.
+Every turn returns a top-10 list; the confidence gate only decides whether to
+also attach a clarifying question. Retrieval/rerank failures fall back to a
+popularity ordering so ``respond`` never raises.
 """
 
 from __future__ import annotations
@@ -79,10 +71,8 @@ def _parse_price_constraint(text: str) -> PriceConstraint | None:
 
 
 def ask_policy() -> str:
-    """Ship default is ``always_ask`` (the measured 0.968-TechScore champion,
-    see docs/project_description.md). ``ASK_POLICY=attribute_cycle`` swaps in
-    the specific-attribute-per-turn, never-repeat policy for A/B measurement;
-    see ``decide_specific_attribute``'s docstring for the tradeoff."""
+    """Ship default is ``always_ask``. ``ASK_POLICY=attribute_cycle`` swaps in
+    the specific-attribute-per-turn, never-repeat policy for A/B measurement."""
     return os.environ.get("ASK_POLICY", "always_ask").strip() or "always_ask"
 
 
@@ -102,10 +92,9 @@ class Agent:
         # router's vocab scan is warmed here too -- left lazy it fired inside
         # the first respond() call and made turn 1 a multi-second outlier.
         self._reranker = build_reranker(self._catalog_path)
-        # Vector-capable retriever sharing the reranker's already-built in-memory
-        # catalog (no second load). Enables BM25 + semantic retrieval as two
-        # independent parallel sources; retrieve_vector degrades to [] when the
-        # embedding cache / endpoint / numpy are unavailable.
+        # Vector-capable retriever sharing the reranker's in-memory catalog.
+        # retrieve_vector degrades to [] when the embedding cache/endpoint/numpy
+        # are unavailable.
         self._retriever = Retriever.with_vectors(self._reranker.catalog)
         self._hybrid_retriever = HybridRetriever(
             self._retriever,
@@ -194,6 +183,7 @@ class Agent:
 
         # -- 3b. Update conversation summary ---------------------------------
         session = self._ledger.read(session_id)
+        # Summarizer disabled: kept for the record; empty summary is a no-op here.
         # current_summary = self._ledger.read(session_id).get("conversation_summary", "")
         # summary = self._summarizer.summarize(
         #     last_user_message=user_message,
@@ -215,11 +205,9 @@ class Agent:
         conf_ledger.observe(user_message, turn)
         session = self._ledger.read_ref(session_id)
         constraints = self._collect_constraints(session)
-        # `category` is a search-scoping signal pulled from the (possibly
-        # vague) opening line, not a disclosed answer to a clarifying
-        # question -- it must not by itself satisfy the confidence gate's
-        # zero-info forced-clarify check. Retrieval/coverage still use the
-        # unfiltered `constraints` list below.
+        # `category` is a search-scoping signal from the opening line, not a
+        # disclosed answer -- exclude it from the confidence gate's zero-info
+        # forced-clarify check. Retrieval/coverage still use `constraints` below.
         disclosed_constraints = self._collect_constraints(session, exclude_attrs={"category"})
         added_new = False
         for value in disclosed_constraints:
@@ -229,9 +217,8 @@ class Agent:
             conf_ledger.reset_progress()
 
         # -- 5. Build search key + query --------------------------------------
-        # Union-join this turn's parser-derived key with the previous turn's so
-        # the key is monotonic across turns: text attributes accumulate (union),
-        # numeric range filters (price/rating) are updated to the latest value.
+        # Union this turn's key with the previous turn's so the key is monotonic:
+        # text attributes accumulate, numeric range filters take the latest value.
         session = self._ledger.read(session_id)
         current_key = build_search_key(session)
         previous_key = session.get("search_key") or {}
@@ -321,21 +308,9 @@ class Agent:
         if payload.ask_attribute:
             conf_ledger.note_ask(payload.ask_attribute)
 
-        # Message-phrasing: every attribute not yet disclosed, bundled into
-        # one question (see missing_topics's docstring). Independent of
-        # payload.ask_attribute (the contract field, which stays "other"
-        # under always_ask). Recomputed fresh from known_attrs each turn --
-        # no per-session state, so a missing attribute keeps being asked
-        # about until it's actually known.
-        #
-        # known_attrs_for_missing (not known_attrs itself, to leave
-        # safe_decide/decide_specific_attribute's already-measured behaviour
-        # untouched): also counts budget as known when price_constraint is
-        # set. A dollar-sign-less disclosure ("under 50") bypasses extract_
-        # attributes()'s own budget regex (which requires a literal "$"),
-        # but _parse_price_constraint already understands it and the search
-        # layer already uses it -- the follow-up question shouldn't keep
-        # asking about something already effectively provided.
+        # Every not-yet-disclosed attribute, bundled into one question, recomputed
+        # fresh each turn. known_attrs_for_missing also counts budget as known when
+        # a price_constraint is set (covers "under 50" with no literal "$").
         known_attrs_for_missing = set(known_attrs)
         if session.get("price_constraint"):
             known_attrs_for_missing.add("budget")
@@ -369,17 +344,10 @@ class Agent:
     def _union_search_key(previous: dict[str, list], current: dict[str, list]) -> dict[str, list]:
         """Merge the previous turn's search key with the current one.
 
-        Text fields (list-of-strings) are *unioned* -- values accumulate across
-        turns, de-duplicated, preserving first-seen order. Numeric range filters
-        (``price``/``rating`` etc., list-of-``{op: value}``) are *updated*: the
-        current turn's value replaces the previous one (latest budget wins),
-        rather than unioning bounds which could impose contradictory limits.
-
-        The result is monotonic for text (never loses a previously-known value)
-        while staying correct for numeric constraints.
+        Text fields are unioned (values accumulate, de-duplicated, order-preserving).
+        Numeric range filters (price/rating) are updated to the current turn's value
+        (latest budget wins) rather than unioned into contradictory bounds.
         """
-        # Local import: reuse the retriever's numeric-shape classifier so this
-        # stays in lock-step with how retrieve_bm25 interprets the key.
         from src.retrieval.retrieval import _is_numeric_filter
 
         merged: dict[str, list] = {}
@@ -424,9 +392,8 @@ class Agent:
 
     @staticmethod
     def _build_summary_search_key(summary: str) -> dict:
-        # Use summary directly as the vector query — it already captures semantic
-        # intent, so a second LLM call to shorten it is redundant.
-        # search_key_string = Agent._extract_search_key_with_llm(summary)
+        # Summary is used directly as the vector query; a second LLM call to
+        # shorten it (see _extract_search_key_with_llm) was measured redundant.
         return {"_string": summary}
 
     @staticmethod

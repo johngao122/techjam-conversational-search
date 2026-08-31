@@ -43,8 +43,7 @@ from src.reranker.types import RankResult
 
 def retrieval_mode() -> str:
     """Ship default is ``bucket``; ``RETRIEVAL_MODE=legacy`` reproduces the
-    original BM25 pipeline byte-identically (the A/B control and the last
-    fallback rung)."""
+    original BM25 pipeline."""
     return os.environ.get("RETRIEVAL_MODE", "bucket").strip().lower() or "bucket"
 
 _ROW_COLUMNS = (
@@ -71,13 +70,10 @@ def _hydrate_products(
     parent_asins: list[str],
     cache: dict[str, Product] | None = None,
 ) -> dict[str, Product]:
-    """Batch-fetch catalog rows for ``parent_asins`` and build reranker ``Product``
-    shims keyed by parent_asin.
+    """Batch-fetch catalog rows for ``parent_asins`` into ``Product`` shims.
 
-    ``cache`` (if given) is a persistent, content-addressed store of
-    previously hydrated products (keyed by ``parent_asin``, never mutated by
-    the catalog during a run) -- only the ids missing from it are fetched,
-    and the cache is updated in place with any newly fetched rows."""
+    ``cache`` (if given) stores previously hydrated products; only missing ids
+    are fetched and the cache is updated in place with newly fetched rows."""
     if not parent_asins:
         return {}
     if cache is None:
@@ -160,14 +156,10 @@ class Reranker:
         # read-only for the duration of a run, so a cache hit is always exactly
         # the value the uncached path would have computed.
         self._product_cache: dict[str, Product] = {}
-        # Per-session resolved bucket key, keyed by opening message. The
-        # coarse category is disclosed once (turn 1) and holds for the whole
-        # session, so resolution is cached rather than re-run every turn.
-        # Bounded: the key is arbitrary user text, one entry per session.
+        # Per-session resolved bucket key, keyed by opening message (category is
+        # disclosed once on turn 1, so resolution is cached, not re-run).
         self._bucket_cache: OrderedDict[str, tuple[list[str], bool, bool]] = OrderedDict()
-        # Shared fallback pool. Materializing a fresh 50k list per unresolved
-        # session and pinning it in the cache is a lot of memory for a list
-        # nobody mutates.
+        # Shared whole-catalog fallback pool (avoids materializing a 50k list per session).
         self._all_asins: list[str] | None = None
 
     def rank_bucket(
@@ -288,10 +280,8 @@ class Reranker:
         if not scored:
             return RankResult()
 
-        # rating_style adjusts how much average_rating vs rating_number (volume)
-        # influences tie-breaking. A "critical" rater deflates scores, making
-        # average_rating noisy -- lean on volume. A "usually positive" rater's
-        # high scores are meaningful -- lean on average_rating.
+        # rating_style weights average_rating vs rating_number (volume) in
+        # tie-breaking: critical raters lean on volume, positive on rating.
         style = (rating_style or "").lower()
         if "critical" in style:
             w_rating, w_volume = 0.5, 1.5
@@ -337,8 +327,7 @@ class Reranker:
             return RankResult()
 
         # max_coverage / crowd are advisory internals for the confidence gate;
-        # in bucket mode the exposure gate is turn-based, so a coarse count of
-        # constraints that landed a nonzero score on the top candidate suffices.
+        # a coarse count of constraints scoring nonzero on the top candidate suffices.
         max_cov = 0
         if prepared:
             best = ranked[0]
@@ -386,8 +375,7 @@ class Reranker:
 def build_reranker(catalog_path: str) -> Reranker:
     catalog = Catalog(catalog_path)
     retriever = Retriever(catalog)
-    # The bucket + verbatim-constraint indexes share the lru_cached catalog
-    # rows, so building them here is one extra pass over already-parsed data.
+    # Bucket + constraint indexes share the lru_cached catalog rows.
     rows = load_catalog_rows(str(catalog_path))
     bucket_index = BucketIndex(rows)
     constraint_index = ConstraintIndex(rows)

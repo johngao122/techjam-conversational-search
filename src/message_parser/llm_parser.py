@@ -293,9 +293,8 @@ class LLMMessageParser:
         self.known_categories: set[str] = known_categories or set()
         self.known_brands: set[str] = known_brands or set()
 
-        # Build the system prompt once at construction time. The catalog hint
-        # sample is randomised here so successive parses are consistent within
-        # the same parser instance (avoid per-call randomness).
+        # Build the system prompt once; the catalog hint sample is randomised
+        # here so parses are consistent within the same parser instance.
         self._system_prompt = _build_system_prompt(self.known_categories, self.known_brands)
 
     def parse(self, text: str) -> ParsedMessage:

@@ -45,11 +45,8 @@ def safe_decide(
     ``rank_fn`` is a zero-arg callable returning a ``RankResult``. On any
     exception or empty pool we return the popularity fallback with conf=0 and
     clarify=True. ``policy`` selects the clarify decision: ``"always_ask"``
-    (the ship-gate champion arm, see ``scripts/sweep_confidence.py``),
-    ``"confidence"`` (the coverage-based ``decide`` heuristic, gated by
-    ``theta``), or ``"attribute_cycle"`` (asks a specific, not-yet-asked
-    attribute each turn instead of the fixed "other" wildcard -- see
-    ``decide_specific_attribute``'s docstring for the measured tradeoff;
+    (shipped default), ``"confidence"`` (coverage-based ``decide``, gated by
+    ``theta``), or ``"attribute_cycle"`` (asks a specific attribute each turn;
     ``known_attrs`` is only consulted by this policy). Returns
     ``(payload, recommendations)``.
     """

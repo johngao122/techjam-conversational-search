@@ -1,32 +1,18 @@
 """Situational follow-up message generation (hardcoded, first pass).
 
-Under the shipped ``always_ask`` policy, the actual ``ask_attribute`` the API
-contract returns is always the "other" wildcard -- that's what earns the
-score (see ``src/confidence/policy.py::decide_specific_attribute``'s docstring
-for the measured reason it must stay that way). This module gives the
-*message text* real content anyway, in two ways:
+Under the shipped ``always_ask`` policy the contract's ``ask_attribute`` is
+always the "other" wildcard (see ``src/confidence/policy.py``). This module
+only shapes the *message text*, in two ways:
 
 - ``build_ask_message`` + ``context.topic``: one specific attribute per
   question (from ``next_unasked_topic``, cycling, never repeating).
 - ``build_all_missing_ask_message`` + ``context.missing_attrs``: every
-  attribute not yet disclosed, bundled into one question (from
-  ``missing_topics``), dynamically shrinking each turn as more becomes
-  known. Once nothing is missing, pivots to a ranking-preference closer
-  (ratings vs. popularity) instead of continuing to ask about attributes --
-  cosmetic only: the reranker's rating/popularity tie-break already runs
-  unconditionally regardless of customer input.
+  attribute not yet disclosed, bundled into one question, shrinking each
+  turn. Once nothing is missing, pivots to a ranking-preference closer.
 
-Both are message-phrasing options over the same underlying signals; neither
-touches the contract's ``ask_attribute`` field.
-
-Note: the evaluator's ``customer_reply()`` (``evaluator/local_evaluator.py``)
-decides what to reveal next turn purely from the contract's ``ask_attribute``
--- it never reads ``message`` text, and neither ``topic`` nor
-``missing_attrs`` touch that field. This module therefore has zero effect on
-HitRate@10/MRR/MTTC/TechnicalScore; it is a demo/UX quality improvement, not
-a scoring lever. Kept deliberately separate from the confidence *decision*
-(``policy.py``) so a change here can never regress the champion
-``always_ask`` arm.
+Neither touches the contract's ``ask_attribute`` field, so this has no effect
+on the evaluator's score -- it is a demo/UX improvement kept separate from the
+confidence decision (``policy.py``).
 """
 
 from __future__ import annotations
@@ -89,10 +75,8 @@ _ATTRIBUTE_QUESTIONS = {
     "use_case": "What will you mainly use it for?",
 }
 
-# Short labels for bundling several attributes into one sentence -- distinct
-# from the standalone questions above, since "Do you have a preference for
-# the type of item, material, color, and size?" needs noun-phrase fragments,
-# not full questions, to read naturally when several are joined.
+# Short noun-phrase labels for bundling several attributes into one sentence,
+# distinct from the standalone questions above (which don't join naturally).
 _ATTRIBUTE_LABELS = {
     "category": "the type of item",
     "material": "material",
@@ -105,11 +89,8 @@ _ATTRIBUTE_LABELS = {
     "use_case": "what you'll use it for",
 }
 
-# -- Situational fallback (used when topic is None -- every one of the 9
-# specific attributes has already been suggested this session, or the caller
-# passed no context at all). Single-focus, open-ended -- never enumerates
-# several attribute names in one sentence, same rule as the topic-specific
-# questions above: one thing asked at a time, not several at once. -----------
+# -- Situational fallback (topic is None: all attributes already suggested,
+# or no context passed). Single-focus, open-ended -- one thing at a time. ----
 
 _ASK_INTENT_OVERRIDE = "Got it, updating my search based on that! Is there anything else that would help?"
 _ASK_BOUNDARY = "No worries, I'll use my judgment there. Anything else you'd like me to keep in mind?"
@@ -123,10 +104,8 @@ _ASK_INTENT_OVERRIDE_LEAD = "Got it, updating my search based on that!"
 _ASK_BOUNDARY_LEAD = "No worries, I'll use my judgment there."
 _ASK_LATE_TURN_LEAD = "We're getting close!"
 
-# All attributes covered: pivot to a ranking-preference closer instead of
-# continuing to ask about search-narrowing attributes. Cosmetic only -- see
-# module docstring; the reranker's rating/popularity tie-break already runs
-# unconditionally regardless of what's answered here.
+# All attributes covered: pivot to a ranking-preference closer instead of a
+# narrowing question. Cosmetic only -- see module docstring.
 _ASK_ALL_COVERED = "I think I have everything I need! Do you tend to prefer higher-rated options, or more popular picks?"
 
 # -- Recommend-only variants (used when payload.clarify is False) ------------
@@ -137,14 +116,10 @@ _RECOMMEND_DEFAULT = "Here are the closest matches I found."
 
 
 def build_ask_message(context: FollowUpContext | None) -> str:
-    """Message text for a turn where the agent is asking a follow-up
-    question, phrased around one specific attribute (``context.topic``).
-    Falls back to the generic default with no context.
-
-    A ``topic`` (an unused attribute suggested for phrasing) takes priority
-    and is layered with a situational lead-in for override/boundary turns;
-    no topic falls through to purely situational phrasing.
-    """
+    """Message text for a follow-up question, phrased around one specific
+    attribute (``context.topic``). A topic takes priority and is layered with
+    a situational lead-in; no topic falls through to situational phrasing.
+    Falls back to the generic default with no context."""
     if context is None:
         return _ASK_DEFAULT
 
@@ -183,16 +158,11 @@ def _join_labels(attrs: tuple[str, ...]) -> str:
 
 
 def build_all_missing_ask_message(context: FollowUpContext | None) -> str:
-    """Message text for a turn where the agent asks about every attribute
-    still missing (``context.missing_attrs``), bundled into one question.
-
-    Recomputed fresh from what's known every turn -- an attribute stays in
-    the question until it's actually disclosed, not just asked once. Layered
-    with a situational lead-in for override/boundary/late-turn, same as
-    ``build_ask_message``. Once nothing is missing, pivots to a
-    ranking-preference closer instead of a narrowing question. Falls back to
-    the generic default with no context.
-    """
+    """Message text asking about every attribute still missing
+    (``context.missing_attrs``), bundled into one question and recomputed
+    fresh each turn. Layered with a situational lead-in; once nothing is
+    missing, pivots to a ranking-preference closer. Falls back to the generic
+    default with no context."""
     if context is None:
         return _ASK_DEFAULT
 

@@ -1,31 +1,17 @@
 """Curated embedding-document builder.
 
-Turns a raw catalog product into a compact string capturing its **core
-semantics** for vector search. This layer is deliberately *complementary to
-BM25*: FTS5 BM25 already matches the keyword- and attribute-dense fields that
-product owners stuff (``title``, ``features``, ``details`` -- material, size,
-fit, brand, closure type, etc.). Duplicating that lexical signal in the
-embedding adds nothing. Instead the vector layer should capture the conceptual
-"what is this / what is it for" that survives paraphrase and vocabulary
-mismatch, which BM25 cannot.
-
-So the embed doc uses only the semantic fields:
+Turns a raw catalog product into a compact string capturing its core
+semantics for vector search, complementary to BM25: BM25 owns the
+keyword/attribute-dense fields, so the embed doc uses only the semantic
+fields that survive paraphrase and vocabulary mismatch:
 
     title        -- the product name (concept + type)
-    categories   -- taxonomy path (e.g. "Shirts > T-Shirts"), high-semantic
+    categories   -- taxonomy path (e.g. "Shirts > T-Shirts")
     description  -- a short leading slice of the natural-language description
 
-``store``/brand, ``features`` and ``details`` are intentionally **excluded** --
-they are keyword/attribute signal owned by BM25.
-
-Note: we deliberately do NOT distil the description into parsed attributes
-(via ``MessageParser``). That was considered and rejected: attribute extraction
-reproduces exactly the material/category/brand signal BM25 already handles
-(recreating the redundancy we are removing), and the parser -- tuned for short
-customer messages -- is noisy on long marketing prose (e.g. it reads
-"color: stone", "size: S", "use_case: party" from incidental words). The raw
-description slice preserves the paraphrasable semantics that are this layer's
-entire value-add.
+``store``/brand, ``features`` and ``details`` are excluded (BM25 signal). We
+also do NOT distil the description into parsed attributes: that reproduces
+BM25's signal and the parser is noisy on long marketing prose.
 
 The output is a plain string; embedding is handled elsewhere.
 """
@@ -34,18 +20,12 @@ from __future__ import annotations
 
 import re
 
-# Leading characters taken from the (often long, unbounded) description field.
-# Kept tight: the description is natural-language prose whose leading sentences
-# carry the product's semantic gist; later sentences are marketing filler. This
-# is also the field that drives embedding-model token overflow, so bounding it
-# here keeps docs comfortably inside a 512-token window.
+# Leading slice of the description field: leading sentences carry the
+# semantic gist, and bounding it keeps docs inside a 512-token window.
 _DESCRIPTION_CHAR_BUDGET = 250
 
 # Overall character cap on the assembled document, aligned with a typical
-# 512-token embedding window. Description prose is natural English (low token
-# density), so 512 chars is ~120-170 tokens -- safely inside the window. The
-# EmbeddingClient enforces its own per-input cap + overflow handling as a
-# backstop for pathological records.
+# 512-token embedding window (~120-170 tokens of English prose).
 _DOC_CHAR_BUDGET = 512
 
 _WS_RE = re.compile(r"\s+")

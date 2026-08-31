@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from src.reranker.types import RankResult
 
-# Starting weights (swept in Step 3). Must sum to 1.0.
+# Starting weights (swept in ship-gate step). Must sum to 1.0.
 W1 = 0.45
 W2 = 0.35
 W3 = 0.20

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Runtime — needed to construct the Agent and run the evaluator
 python-dotenv>=1.0.0     # evaluator loads a local .env if one is present
 ollama>=0.3.0            # imported by src/agent.py; the summariser it feeds stays
@@ -9,5 +10,18 @@ numpy>=1.24             # dense-retrieval helpers (inactive without an embedding
 # neither of which is on the scored path
 openai>=1.0.0
 
+=======
+# Core dependencies
+python-dotenv>=1.0.0
+openai>=1.0.0
+
+# Retrieval / embeddings
+numpy>=1.24.0
+nltk>=3.8.0
+
+# Local LLM summarization / query rewriting (Ollama daemon)
+ollama>=0.1.0
+
+>>>>>>> 7c1fd1a (clean up code)
 # Testing
 pytest>=7.0.0

@@ -45,18 +45,13 @@ _MAX_RETRIES = 3
 _RETRY_BACKOFF_SECONDS = 1.5
 
 # Per-input character cap, a cheap pre-filter (NOT the guarantee -- see the
-# overflow handling in ``_embed_batch``). Local embedding models have a fixed
-# max sequence length (e.g. 512 tokens); a single over-long input makes the
-# server reject the whole request. Curated semantic docs are already bounded to
-# ~512 chars of natural-language prose (~120-170 tokens), so this cap rarely
-# bites; it just backstops a pathological input before it reaches the server.
+# overflow handling in ``_embed_batch``). Backstops a pathological over-long
+# input before it reaches the server's fixed max sequence length.
 # Override via ``max_input_chars`` or ``DOCKER_EMBED_MAX_INPUT_CHARS``.
 _DEFAULT_MAX_INPUT_CHARS = 512
 
-# When the server rejects a single input for exceeding the token window, shrink
-# it by this factor and retry. Halving converges quickly to any target size
-# (e.g. 4000 -> 2000 -> 1000 -> ... reaches <=64 chars within ~7 steps), so the
-# recovery is robust even for pathologically long inputs.
+# When the server rejects an input for exceeding the token window, shrink it
+# by this factor and retry; halving converges quickly to any target size.
 _OVERFLOW_SHRINK_FACTOR = 0.5
 _OVERFLOW_MAX_SHRINKS = 12
 
@@ -207,10 +202,8 @@ class EmbeddingClient:
         prefix = self._prefix_for(kind)
         prepared = [f"{prefix}{text}" for text in texts] if prefix else list(texts)
 
-        # Cheap pre-filter: cap each input's chars (after prefixing, so the task
-        # prefix is preserved). This is a first line of defence only -- the real
-        # guarantee against token-window overflow is the server-driven
-        # split/truncate recovery in ``_embed_batch``.
+        # Cheap pre-filter: cap each input's chars (after prefixing). The real
+        # guarantee against overflow is the recovery in ``_embed_batch``.
         if self.max_input_chars:
             truncated = 0
             for i, text in enumerate(prepared):

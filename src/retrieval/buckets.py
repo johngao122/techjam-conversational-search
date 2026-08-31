@@ -1,20 +1,11 @@
 """Category bucketing over the catalog.
 
-The customer's opening line is generated as ``I'm looking for {category}...``
-where ``{category}`` is the *coarse category* of the hidden target -- the last
-two comma-separated segments of that product's own ``categories`` path. So the
-first message names, verbatim, a bucket that is guaranteed to contain the
-target. The catalog splits into 1,115 such buckets with a median size of 8
-(median ~182 for the buckets targets actually fall in), which turns a 50,000
-product ranking problem into a ~180 product one.
-
-``coarse_category`` is reimplemented here rather than imported from
-``evaluator/`` -- the shipped agent must not depend on the evaluator package.
-
-``resolve`` never fails: it degrades through exact match, containment, and
-token overlap before giving up and returning ``None`` (meaning "search the
-whole catalog"). The inexact rungs are paraphrase insurance for the private
-set, where the opening template may be reworded.
+The customer's opening line names the *coarse category* of the hidden target
+(last two segments of its ``categories`` path), so the first message names a
+bucket guaranteed to contain the target -- turning a 50k ranking problem into
+a ~180 one. ``resolve`` never fails: it degrades through exact match,
+containment, and token overlap before returning ``None`` ("search the whole
+catalog"); the inexact rungs are paraphrase insurance for reworded openings.
 """
 
 from __future__ import annotations
@@ -28,12 +19,9 @@ _EXCLUDED = {"clothing", "clothing shoes & jewelry", "clothing, shoes & jewelry"
 
 _FALLBACK_CATEGORY = "clothing item"
 
-# The opening line, whose tail is the coarse category. The browsing/boundary
-# variant ends ", but I'm still exploring."; buying continues ". A key
-# requirement is: ..."; intent_override continues ". <preference>".
-# Kept deliberately loose on the verb: the private set may reword the wrapper,
-# and the category tail is what matters. If no verb matches at all, `parse_category`
-# falls back to the whole message so the fuzzy rung still has something to chew on.
+# Opening line whose tail is the coarse category. Kept loose on the verb so
+# reworded wrappers still match; parse_category falls back to the whole message
+# when no verb matches, so the fuzzy rung still has input.
 _OPENING_RE = re.compile(
     r"(?:looking|searching|hunting|shopping)\s+for\s+|"
     r"(?:i\s+(?:want|need)|show\s+me|interested\s+in|after)\s+",
@@ -54,28 +42,17 @@ _FILLER = {"a", "an", "the", "some", "any", "new", "today", "please", "me", "i",
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
-# Minimum token overlap for the fuzzy rung to fire. Below this the match is
-# noise and searching the whole catalog is the safer degradation.
-#
-# Scored as an overlap coefficient (overlap / min(|fragment|, |key|)), not a
-# Jaccard index (overlap / union): a bucket key is a short, structural
-# category name (e.g. "clothing dress"), while the message fragment is a
-# longer, descriptive phrase that legitimately carries extra adjectives
-# ("blue satin dress") the key was never going to contain. Jaccard's union
-# term punishes exactly those legitimate extra words, so a real match like
-# {blue, satin, dress} vs {clothing, dress} (overlap=1, union=4 -> 0.25)
-# would fail a Jaccard threshold that an overlap coefficient (1 / min(3, 2)
-# = 0.5) correctly recognises as "the key is contained in the fragment."
+# Minimum token overlap for the fuzzy rung to fire; below this it's noise.
+# Scored as an overlap coefficient (overlap / min sizes), not Jaccard, so a
+# short structural key contained in a longer descriptive fragment still matches.
 _MIN_OVERLAP = 0.34
 
 
 def _singularize(token: str) -> str:
     """Cheap plural stripping so e.g. "dress" overlaps catalog "dresses".
 
-    Not a real lemmatizer -- just enough to close the gap between how a
-    customer names an item ("a dress") and how the catalog's category taxonomy
-    names it ("Dresses"), which the exact/containment rungs never see because
-    they compare unstemmed strings.
+    Not a real lemmatizer -- just enough to bridge singular customer terms and
+    plural catalog taxonomy for the token-overlap rung.
     """
     if token.endswith("sses"):
         return token[:-2]
@@ -127,13 +104,11 @@ def fragment_type_tokens(message: str) -> set[str]:
 
 
 def head_noun_token(message: str) -> str | None:
-    """The single word most likely to name the item's *type*, not its
-    attributes -- the last content word of the category fragment (English
-    noun phrases put the head noun last: "blue satin dress" -> "dress").
+    """The last content word of the category fragment -- the head noun that
+    names the item's *type* ("blue satin dress" -> "dress").
 
-    Used by the title-relevance gate, where OR-ing in every content word
-    (colors, materials) would readmit exactly the off-type matches the gate
-    exists to block -- e.g. a heel whose title also happens to say "satin".
+    Used by the title-relevance gate; OR-ing in colors/materials would readmit
+    the off-type matches the gate exists to block.
     """
     fragment = parse_category(message)
     if not fragment:
@@ -192,9 +167,8 @@ class BucketIndex:
         if lowered in self._buckets:
             return lowered, "exact"
 
-        # Containment: the fragment survived a reworded wrapper, or the
-        # organizer trimmed/extended the path. Longest wins -- a longer key
-        # shares more of the path and so is the more specific bucket.
+        # Containment: reworded wrapper or trimmed/extended path. Longest wins
+        # -- a longer key shares more of the path, so it's the more specific bucket.
         contained = [
             key for key in self._buckets
             if key and (key in lowered or lowered in key)

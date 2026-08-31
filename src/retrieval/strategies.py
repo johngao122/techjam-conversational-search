@@ -8,8 +8,7 @@ so the reranker consumes a single uniform :class:`RetrievalResult` shape:
   * :class:`ConstraintStrategy` -- verbatim-constraint re-ordering of a pool
   * :class:`BucketPipeline`     -- composite reproducing the bucket-mode ladder
 
-Caching that used to live on the ``Reranker`` moves here, next to the method it
-belongs to, so the reranker owns no retrieval state.
+Per-method caching lives here so the reranker owns no retrieval state.
 """
 
 from __future__ import annotations
@@ -192,11 +191,8 @@ class BucketPipeline:
         prepared = prepare_constraints(request.constraints)
 
         # Paraphrase insurance: score the bucket by transcript-token overlap
-        # when the verbatim path produced nothing AND the opening category
-        # itself failed to resolve exactly -- i.e. the template wording drifted.
-        # Gating on the inexact-resolution signal keeps the clean public set
-        # (where the category always resolves exactly and an exact constraint
-        # match dominates) completely untouched.
+        # when the verbatim path produced nothing AND the category didn't resolve
+        # exactly. Gating on inexact resolution leaves the clean public set untouched.
         if not prepared and not bucket_result.resolved_exact and request.transcript.strip():
             _, t_toks = prepare(request.transcript)
             for tok in dict.fromkeys(t_toks):
