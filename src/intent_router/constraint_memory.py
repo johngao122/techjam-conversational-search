@@ -44,6 +44,9 @@ _COLOR_RE = re.compile(r"\b(" + "|".join(_COLORS) + r")\b", re.I)
 _KEY_REQ_RE = re.compile(r"a\s+key\s+requirement\s+is\s*:?\s*", re.I)
 _MATTERS_RE = re.compile(r"(?:for\s+that\s*,?\s*)?what\s+matters\s+is\s*:?\s*", re.I)
 _NEED_RE = re.compile(r"what\s+i\s+need\s+is\s*:?\s*", re.I)
+# Aggressive paraphrase: "well X and also Y would be great"
+_WELL_RE = re.compile(r"^(?:well|sure|okay|yes|hmm|right)\s+", re.I)
+_WOULD_BE_GREAT_RE = re.compile(r"\s+(?:would\s+be\s+great|is\s+important|matters)\s*$", re.I)
 # Opening line: "I'm looking for {cat}. {trailing}" -- the trailing clause after
 # the category sentence is a free constraint (the override old_value), which the
 # evaluator never adds to `disclosed`, so it must be captured here or it is lost.
@@ -84,6 +87,15 @@ def extract_constraints(message: str, turn: int) -> list[str]:
     found.extend(_split_after(text, _KEY_REQ_RE))
     found.extend(_split_after(text, _MATTERS_RE))
     found.extend(_split_after(text, _NEED_RE))
+
+    # Aggressive paraphrase: "well X and also Y would be great"
+    if not found and _WELL_RE.match(text):
+        body = _WELL_RE.sub("", text)
+        body = _WOULD_BE_GREAT_RE.sub("", body)
+        for part in re.split(r"\s+and\s+also\s+", body, flags=re.I):
+            cleaned = _clean(part)
+            if cleaned:
+                found.append(cleaned)
 
     # Turn-1 opening trailing clause: "I'm looking for {cat}. {old_value}".
     # Only the override scenario puts a real constraint here; buying uses the
