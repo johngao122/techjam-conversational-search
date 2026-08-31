@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from src.reranker import Reranker, build_reranker, default_query
+from src.reranker import rank as rank_module
 from src.reranker.coverage import Product, covers, coverage_count
 from src.reranker.rank import _hydrate_products
 from src.catalog.catalog import Catalog
@@ -269,6 +270,78 @@ class ContextualRerankTest(unittest.TestCase):
         res = self.rr.rank(default_query(["cotton", "red"]), ["cotton", "red"])
         self.assertEqual(res.ranked[0], "NOISE00001")
         self.assertEqual(res.max_coverage, 2)
+
+
+# Both rows satisfy the plain "jacket" content-token constraint equally (the
+# distractor's title/description mention "jacket" incidentally), but only
+# JACKET0001 is structurally categorized as "Jackets" -- the exact vest-vs-
+# jacket problem CATEGORY_MATCH_BONUS exists to nudge.
+CATEGORY_BONUS_ROWS = [
+    {
+        "parent_asin": "JACKET0001",
+        "title": "Outdoor Coat",
+        "features": ["water resistant"],
+        "details": {},
+        "description": ["warm outer layer, great jacket for winter"],
+        "categories": ["Clothing, Shoes & Jewelry, Jackets"],
+        "store": "Acme",
+        "average_rating": 4.0,
+        "rating_number": 50,
+        "price": 60.0,
+    },
+    {
+        "parent_asin": "VEST0001",
+        "title": "Jacket-style Puffer Vest",
+        "features": ["jacket look", "sleeveless"],
+        "details": {},
+        "description": ["pairs well with any jacket"],
+        "categories": ["Clothing, Shoes & Jewelry, Vests"],
+        "store": "Acme",
+        "average_rating": 4.0,
+        "rating_number": 50,
+        "price": 55.0,
+    },
+]
+
+
+class CategoryBonusTest(unittest.TestCase):
+    """CATEGORY_MATCH_BONUS nudges a structurally-categorized match above a
+    text-overlapping but wrong-category distractor, without acting as a hard
+    filter -- both rows still satisfy the "jacket" content-token constraint,
+    the bonus only breaks the tie."""
+
+    def setUp(self) -> None:
+        self.rr = build_reranker(_catalog_file(CATEGORY_BONUS_ROWS))
+        self._prev_bonus = rank_module.CATEGORY_MATCH_BONUS
+
+    def tearDown(self) -> None:
+        rank_module.CATEGORY_MATCH_BONUS = self._prev_bonus
+
+    def test_disabled_keeps_retrieval_order(self) -> None:
+        rank_module.CATEGORY_MATCH_BONUS = 0.0
+        # Distractor listed first in the candidate pool; equal coverage (both
+        # match "jacket") and equal rating mean retrieval order alone decides
+        # with the bonus off, so the distractor stays on top.
+        res = self.rr.score_by_coverage(
+            ["VEST0001", "JACKET0001"], ["jacket"], category_constraints=["jackets"],
+        )
+        self.assertEqual(res.ranked[0], "VEST0001")
+
+    def test_enabled_promotes_correct_category(self) -> None:
+        rank_module.CATEGORY_MATCH_BONUS = 0.5
+        res = self.rr.score_by_coverage(
+            ["VEST0001", "JACKET0001"], ["jacket"], category_constraints=["jackets"],
+        )
+        self.assertEqual(res.ranked[0], "JACKET0001")
+
+    def test_no_category_constraint_is_a_no_op(self) -> None:
+        rank_module.CATEGORY_MATCH_BONUS = 0.5
+        with_none = self.rr.score_by_coverage(["VEST0001", "JACKET0001"], ["jacket"])
+        with_empty = self.rr.score_by_coverage(
+            ["VEST0001", "JACKET0001"], ["jacket"], category_constraints=[],
+        )
+        self.assertEqual(with_none.ranked, with_empty.ranked)
+        self.assertEqual(with_none.ranked[0], "VEST0001")
 
 
 if __name__ == "__main__":
