@@ -239,16 +239,16 @@ class Agent:
         # -- 5b. Parallel retrieval sources -----------------------------------
         llm_search_key = session.get("llm_search_key") or {}
         vector_query = llm_search_key.get("_string")
+        pref_tags = session.get("user_preference", {}).get("preference_tags", [])
+        rating_style = session.get("user_preference", {}).get("rating_style")  
         # BM25 uses SQLite which is not thread-safe across threads, so run sequentially.
         print(f"[DEBUG] search_key: {search_key}")
-        bm25_results = self._retriever.retrieve_bm25(search_key, top_k=top_k)
+        bm25_results = self._retriever.retrieve_bm25(search_key, top_k=top_k, preference_tags=pref_tags)
         print(f"[DEBUG] bm25_results: {bm25_results}")
         vector_results = self._retriever.retrieve_vector(vector_query, top_k=top_k)
         # vector_results = []
 
         # -- 6. Retrieval + Rerank + Decision (never raises) ------------------
-        pref_tags = session.get("user_preference", {}).get("preference_tags", [])
-        rating_style = session.get("user_preference", {}).get("rating_style")
         if self._mode == "legacy":
             rank_fn = lambda: self._reranker.rank(query, constraints, top_k=top_k, preference_tags=pref_tags, rating_style=rating_style)
         elif self._mode == "hybrid":

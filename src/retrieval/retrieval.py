@@ -55,6 +55,41 @@ _DEFAULT_WEIGHTS: dict[str, float] = {
     "description": 1.0,
 }
 
+# Maps preference tag substrings to per-column weight deltas.
+# Tags are free-form, so we match by substring (case-insensitive).
+_PREF_WEIGHT_RULES: list[tuple[str, dict[str, float]]] = [
+    ("brand",    {"store": 1.5, "title": 0.5}),
+    ("store",    {"store": 1.5, "title": 0.5}),
+    ("feature",  {"features": 1.5, "details": 1.0}),
+    ("detail",   {"features": 1.0, "details": 1.5}),
+    ("quality",  {"features": 1.0, "details": 1.0}),
+    ("comfort",  {"features": 1.0, "description": 0.5}),
+    ("fit",      {"features": 1.0, "description": 0.5}),
+    ("style",    {"title": 0.5, "description": 0.5}),
+    ("categor",  {"categories": 2.0}),
+    ("browse",   {"categories": 1.5, "description": 0.5}),
+    ("value",    {"description": 1.0}),
+    ("price",    {"description": 0.5}),
+]
+
+
+def _weights_for_preference_tags(
+    base: dict[str, float], preference_tags: list[str]
+) -> dict[str, float]:
+    """Return a copy of ``base`` with column weights nudged by ``preference_tags``."""
+    if not preference_tags:
+        return base
+    deltas: dict[str, float] = {}
+    for tag in preference_tags:
+        tag_lower = tag.lower()
+        for keyword, weight_delta in _PREF_WEIGHT_RULES:
+            if keyword in tag_lower:
+                for col, delta in weight_delta.items():
+                    deltas[col] = deltas.get(col, 0.0) + delta
+    if not deltas:
+        return base
+    return {col: base.get(col, 0.0) + deltas.get(col, 0.0) for col in base}
+
 # Maps a search-key *text field* to the FTS columns it should search. A field
 # not listed here falls back to every text column.
 _DEFAULT_FIELD_MAP: dict[str, tuple[str, ...]] = {
@@ -179,7 +214,12 @@ class Retriever:
     # ------------------------------------------------------------------
     # Retrieval
     # ------------------------------------------------------------------
-    def retrieve_bm25(self, search_key: dict[str, list], top_k: int = 10) -> list[str]:
+    def retrieve_bm25(
+        self,
+        search_key: dict[str, list],
+        top_k: int = 10,
+        preference_tags: list[str] | None = None,
+    ) -> list[str]:
         """Return up to ``top_k`` ``parent_asin`` strings ranked by weighted
         BM25, filtered by any numeric range constraints in ``search_key``.
 
@@ -192,8 +232,9 @@ class Retriever:
         match_expression = self._build_match_expression(search_key)
         where_clause, where_params = self._build_numeric_filter(search_key)
 
+        weights = _weights_for_preference_tags(self.weights, list(preference_tags or []))
         bm25_args = ", ".join(
-            str(self.weights.get(col, 0.0)) for col in _TEXT_COLUMNS
+            str(weights.get(col, 0.0)) for col in _TEXT_COLUMNS
         )
         # parent_asin (col 0) is weight 0.0; trailing UNINDEXED numeric columns
         # are omitted -- bm25() only weights the text columns.
