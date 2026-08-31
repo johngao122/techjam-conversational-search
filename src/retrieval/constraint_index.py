@@ -27,6 +27,20 @@ SUBSTRING_WEIGHT = 1.0
 TOKEN_WEIGHT = 0.5
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+# Stemmer for normalizing word forms (dress/dresses/dressed -> dress)
+try:
+    from nltk.stem import PorterStemmer
+    _STEMMER = PorterStemmer()
+except ImportError:
+    _STEMMER = None
+
+
+def stem_token(token: str) -> str:
+    """Stem a token to its root form (e.g., 'dresses' -> 'dress')."""
+    if _STEMMER is None:
+        return token
+    return _STEMMER.stem(token)
 _WS_RE = re.compile(r"\s+")
 # True exactly when ``_WS_RE.sub(" ", text)`` would change ``text``: either a
 # run of two or more whitespace characters, or a single whitespace character
@@ -138,6 +152,9 @@ class ConstraintIndex:
         self._inverted: dict[str, set[str]] = {}
         # Token inverted index: token -> set of ASINs whose text contains this token
         self._token_inverted: dict[str, set[str]] = {}
+        # Stemmed token inverted index: stem -> set of ASINs
+        # Enables matching "dress" to products with "dresses", "dressed", etc.
+        self._stem_inverted: dict[str, set[str]] = {}
         # Only ``_exact_weight`` reads this, and only under IDF_WEIGHT=1.
         # Building it unconditionally is a 50k-product tally nobody looks at.
         use_idf = os.environ.get("IDF_WEIGHT", "") == "1"
@@ -160,6 +177,11 @@ class ConstraintIndex:
                     if token not in self._token_inverted:
                         self._token_inverted[token] = set()
                     self._token_inverted[token].add(asin)
+                    # Also index by stem for fuzzy matching
+                    stemmed = stem_token(token)
+                    if stemmed not in self._stem_inverted:
+                        self._stem_inverted[stemmed] = set()
+                    self._stem_inverted[stemmed].add(asin)
             if use_idf:
                 for attribute in attributes:
                     self._document_frequency[attribute] = self._document_frequency.get(attribute, 0) + 1
@@ -179,16 +201,15 @@ class ConstraintIndex:
         """Constraint candidate retrieval using inverted index where possible.
 
         Returns {asin: score} for all products matching at least one constraint.
-        Uses inverted index for exact matches (O(1)), falls back to scan for
-        substring/token matches.
+        Uses inverted index for exact matches (O(1)), then uses stemmed token
+        inverted index for fuzzy matching (dress -> dresses, dressed, etc.).
 
         Matches the same tiered logic as score():
         - Tier 1: Exact attribute match (weight 3.0) - uses inverted index
-        - Tier 2: Substring match (weight 1.0) - only if no exact match
-        - Tier 3: Token containment (weight 0.5) - only if no exact/substring match
+        - Tier 2: Substring match (weight 1.0) - uses stem index, then substring check
+        - Tier 3: Token containment (weight 0.5) - uses stem index intersection
 
-        If ``exact_only=True``, skips the O(n) substring/token scan and returns
-        only exact attribute matches. This is much faster for selective constraints.
+        If ``exact_only=True``, skips Tier 2 & 3 and returns only exact matches.
         """
         scores: dict[str, float] = {}
 
@@ -207,14 +228,43 @@ class ConstraintIndex:
             if exact_only:
                 continue
 
-            # Tier 2 & 3: Substring and token matching (O(n) scan for non-exact matches)
-            # This is the fallback for products that don't have an exact attribute match
-            for asin, text in self.text.items():
+            # Tier 2 & 3: Use STEMMED token inverted index
+            # This handles word variations: dress -> dresses, dressed, dressing
+            # O(1) lookup per stem instead of O(vocab) substring scan
+            if not tokens:
+                continue
+
+            # Get candidates via stem index intersection
+            # Stem each query token and intersect their posting lists
+            stemmed_tokens = [stem_token(t) for t in tokens]
+            candidate_asins: set[str] | None = None
+            
+            for stem in stemmed_tokens:
+                posting = self._stem_inverted.get(stem, set())
+                if candidate_asins is None:
+                    candidate_asins = posting.copy()
+                else:
+                    candidate_asins &= posting
+                # Early exit if intersection is empty
+                if not candidate_asins:
+                    break
+
+            if not candidate_asins:
+                continue
+
+            # Check candidates using substring matching (preserves original scoring behavior)
+            for asin in candidate_asins:
                 if asin in exact_matched:
                     continue
+                if asin in scores:
+                    # Already scored by a previous constraint
+                    continue
+                text = self.text.get(asin, "")
+                # Tier 2: Full normalized string as substring
                 if normalised in text:
                     scores[asin] = scores.get(asin, 0.0) + weight * SUBSTRING_WEIGHT
-                elif tokens and all(token in text for token in tokens):
+                # Tier 3: All tokens as substrings (e.g., "dress" in "dressed")
+                elif all(token in text for token in tokens):
                     scores[asin] = scores.get(asin, 0.0) + weight * TOKEN_WEIGHT
 
         return scores

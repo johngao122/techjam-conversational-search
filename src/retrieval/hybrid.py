@@ -10,11 +10,15 @@ Activated by ``RETRIEVAL_MODE=hybrid`` in :mod:`src.agent`.
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.retrieval.retrieval import Retriever
     from src.retrieval.constraint_index import ConstraintIndex
+
+_LOG = logging.getLogger(__name__)
 
 # Field order for the natural-language constraint string.
 # Category last = English head noun ("blue cotton dress").
@@ -31,12 +35,16 @@ class HybridRetriever:
         pool_size: int = 200,
         rrf_k: int = 60,
         rrf_weights: tuple[float, float, float] = (6.0, 1.0, 1.0),
+        bucket_index: "BucketIndex | None" = None,
     ) -> None:
+        from src.retrieval.buckets import BucketIndex
+        
         self._retriever = retriever
         self._constraint_index = constraint_index
         self._pool_size = pool_size
         self._rrf_k = rrf_k
         self._rrf_weights = rrf_weights
+        self._bucket_index = bucket_index
         # Build FilteredVectorIndex only when vectors are available
         self._fvi = None
         if retriever.has_vectors:
@@ -70,8 +78,13 @@ class HybridRetriever:
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        start_total = time.time()
+
         # Step 1: Build the constraint-filtered pool
+        start_constraint = time.time()
         filtered_pool = self._get_constraint_filtered_pool(constraints, opening_message)
+        constraint_time = time.time() - start_constraint
+        _LOG.debug(f"constraint_filter: {constraint_time:.3f}s, pool_size={len(filtered_pool) if filtered_pool else 0}")
 
         # Enrich category with full fragment from opening message for BM25
         enriched_key = dict(search_key)
@@ -115,29 +128,46 @@ class HybridRetriever:
                 return []
 
         # Execute both searches in parallel with timeout
+        start_parallel = time.time()
+        bm25_ranked: list[str] = []
+        vector_ranked: list[str] = []
+
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_bm25 = executor.submit(run_bm25)
             future_vector = executor.submit(run_vector)
 
             try:
                 bm25_ranked = future_bm25.result(timeout=5.0)
-            except Exception:
+                _LOG.debug(f"bm25_search: {time.time() - start_parallel:.3f}s, results={len(bm25_ranked)}")
+            except Exception as e:
+                _LOG.debug(f"bm25_search failed: {e}")
                 pass
 
             try:
                 vector_ranked = future_vector.result(timeout=5.0)
-            except Exception:
+                _LOG.debug(f"vector_search: {time.time() - start_parallel:.3f}s, results={len(vector_ranked)}")
+            except Exception as e:
+                _LOG.debug(f"vector_search failed: {e}")
                 pass
+
+        parallel_time = time.time() - start_parallel
 
         # Step 3: RRF fuse — includes constraint ranking as a third signal
         # The constraint-filtered pool is already sorted by constraint score,
         # so include it as a ranked list to give high-constraint-match products
         # a boost even if BM25/vector rank them poorly.
+        start_rrf = time.time()
         if not bm25_ranked and not vector_ranked:
             # Both failed: return filtered pool ordered by constraint score if available
             if filtered_pool:
-                return filtered_pool[:self._pool_size]
-            return []
+                result = filtered_pool[:self._pool_size]
+                total_time = time.time() - start_total
+                _LOG.debug(f"retrieve fallback: total={total_time:.3f}s, results={len(result)}")
+                return result
+            result = []
+            total_time = time.time() - start_total
+            _LOG.debug(f"retrieve empty: total={total_time:.3f}s")
+            return result
 
         # Build weighted ranked lists for RRF:
         # Constraint signal is most reliable (verbatim match on disclosed attributes)
@@ -152,51 +182,100 @@ class HybridRetriever:
         weighted_lists.append((bm25_ranked, bm25_w))
         weighted_lists.append((vector_ranked, vector_w))
 
-        return self._rrf_fuse_weighted(weighted_lists, k=self._rrf_k)
+        result = self._rrf_fuse_weighted(weighted_lists, k=self._rrf_k)
+        rrf_time = time.time() - start_rrf
+        total_time = time.time() - start_total
+        _LOG.debug(f"retrieve: total={total_time:.3f}s, constraint={constraint_time:.3f}s, parallel={parallel_time:.3f}s, rrf={rrf_time:.3f}s, results={len(result)}")
+        return result
 
     def _get_constraint_filtered_pool(
         self,
         constraints: list[str] | None,
         opening_message: str = "",
     ) -> list[str] | None:
-        """Pre-filter products by disclosed constraints using inverted index.
+        """Pre-filter products by category bucket AND constraints.
 
-        Returns a list of ASINs that match at least one constraint, ordered by
-        constraint match score. Returns None if no constraint index or no
-        constraints (meaning no filtering).
+        First narrows to the category bucket (like bucket mode), then scores
+        by constraint match. This gives much better precision than scoring
+        all 50k products by constraint alone.
 
-        Uses the inverted index for O(matches) instead of O(n) scoring.
+        Returns a list of ASINs ordered by constraint score, then popularity.
+        Returns None if no constraint index or no constraints.
         """
+        start = time.time()
         if self._constraint_index is None:
             return None
 
         constraints = constraints or []
-        if not constraints:
-            return None
 
-        from src.retrieval.constraint_index import is_inert
         from src.retrieval.constraint_index import is_inert, prepare
+        from src.retrieval.buckets import BucketIndex, parse_category
 
-        # Prepare constraints: (normalised, tokens, weight=1.0)
+        # Step 1: Get category bucket from opening message using FUZZY resolution
+        # This handles paraphrased openings like "some novelty women today" -> "novelty women"
+        start_bucket = time.time()
+        category_pool: set[str] | None = None
+        if opening_message and self._bucket_index is not None:
+            # Use resolve() for fuzzy matching (exact -> containment -> token overlap)
+            bucket_key, match_type = self._bucket_index.resolve(opening_message)
+            if bucket_key:
+                bucket_asins = self._bucket_index.get(bucket_key)
+                if bucket_asins:
+                    category_pool = set(bucket_asins)
+        bucket_time = time.time() - start_bucket
+
+        # Step 2: Prepare constraints
         prepared = [
             (norm, toks, 1.0)
             for norm, toks in (prepare(c) for c in constraints if not is_inert(c))
             if norm
         ]
+
+        # If no constraints but we have a category pool, return it ordered by popularity
         if not prepared:
+            if category_pool:
+                pop = self._constraint_index.popularity
+                result = sorted(category_pool, key=lambda a: -pop.get(a, 0))
+                elapsed = time.time() - start
+                _LOG.debug(f"_constraint_filter (no constraints): {elapsed:.3f}s, bucket={bucket_time:.3f}s, results={len(result)}")
+                return result
             return None
 
-        # Always use the full fast_candidates search to maximize recall.
-        # The small performance hit is worth the improved accuracy.
-        scores = self._constraint_index.fast_candidates(prepared, exact_only=False)
+        # Step 3: Score products by constraint match
+        # If we have a category pool, only score those products (much faster)
+        start_score = time.time()
+        if category_pool:
+            scores: dict[str, float] = {}
+            for asin in category_pool:
+                score = self._constraint_index.score(asin, prepared)
+                if score > 0:
+                    scores[asin] = score
+            # If no constraint matches in category, return category pool by popularity
+            if not scores:
+                pop = self._constraint_index.popularity
+                result = sorted(category_pool, key=lambda a: -pop.get(a, 0))
+                score_time = time.time() - start_score
+                elapsed = time.time() - start
+                _LOG.debug(f"_constraint_filter (no matches): {elapsed:.3f}s, bucket={bucket_time:.3f}s, score={score_time:.3f}s, results={len(result)}")
+                return result
+        else:
+            # No category pool - fall back to fast_candidates on full catalog
+            scores = self._constraint_index.fast_candidates(prepared, exact_only=False)
+            if not scores:
+                score_time = time.time() - start_score
+                elapsed = time.time() - start
+                _LOG.debug(f"_constraint_filter (candidates empty): {elapsed:.3f}s, bucket={bucket_time:.3f}s, score={score_time:.3f}s")
+                return None
 
-        if not scores:
-            return None
+        score_time = time.time() - start_score
 
         # Sort by score descending, then by popularity (tiebreaker)
         scored = list(scores.items())
         scored.sort(key=lambda x: (-x[1], -self._constraint_index.popularity.get(x[0], 0)))
-        return [asin for asin, _ in scored]
+        result = [asin for asin, _ in scored]
+        elapsed = time.time() - start
+        _LOG.debug(f"_constraint_filter: {elapsed:.3f}s, bucket={bucket_time:.3f}s, score={score_time:.3f}s, results={len(result)}")
+        return result
 
     # ------------------------------------------------------------------
     # Helpers
