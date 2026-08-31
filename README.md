@@ -86,7 +86,6 @@ mv catalog.jsonl data/catalog.jsonl
 
 `data/public_set.jsonl` (200 sessions) is already in the repo.
 
-<<<<<<< HEAD
 **No credentials, API keys, network access, or GPU are required.** The `ollama`
 and `openai` packages are imported for optional local components (a conversation
 summariser and a dense-embedding retriever); both degrade to no-ops when their
@@ -127,79 +126,6 @@ Expected headline output: `hit_rate_at_10 1.0`, `mrr ≈ 0.968`, `mttc ≈ 2.07`
 Environment used for the reported figures: Python 3.11, single CPU core, ~1 GB
 RAM, commit `88daecf`. The pipeline is deterministic, so the score is
 reproducible from a frozen commit.
-=======
-## Our System
-
-Our `Agent` lives in `src/agent.py` and wires the pipeline:
-
-```text
-Intent Router -> Ledger -> Retrieval + Reranker -> Confidence (decision) -> Output
-```
-
-- **Intent Router** classifies each message (buying / browsing / intent-override / boundary) and extracts structured attributes.
-- **Ledger** tracks structured per-turn constraints and a cumulative verbatim constraint memory with value-conflict supersession (handles intent override).
-- **Retrieval + Reranker** runs keyword (BM25 over SQLite FTS5), a category bucket pipeline, and optional dense/vector retrieval fused with Reciprocal Rank Fusion, then reranks by constraint coverage and rating-weighted popularity.
-- **Confidence** decides whether to *also* attach a clarifying question; retrieval failures fall back to a popularity ordering so `respond` never raises.
-- **Output** formats the frozen Agent API response.
-
-Every turn returns a top-10 recommendation list.
-
-### Setup
-
-Python 3.10 or later.
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Optional components (the agent runs without them, degrading to keyword retrieval):
-
-- **Embedding cache** for dense retrieval — set the `DOCKER_EMBED_*` variables (see below), then `./embedding_run.sh` or `python3 -m scripts.build_embeddings`.
-- **Local LLM** (Ollama) for query rewriting/summaries — `ollama serve` and pull the model.
-
-Copy `.env.example` to `.env` and fill in any values you need:
-
-```bash
-cp .env.example .env
-```
-
-### Run
-
-```bash
-./run.sh eval
-# equivalent to:
-python3 -m evaluator.local_evaluator --output results_ours.json
-```
-
-This drives our `Agent` through the unmodified official evaluator and writes
-per-session results and aggregate metrics. Do not edit the evaluator or public
-labels when reporting a local score.
-
-The included weak BM25 starter (organizer reference) scores Hit Rate@10 `0.125`,
-MRR `0.068034`, and MTTC `9.81` on the released public set. See
-`docs/baseline_results.json`.
-
-### Environment Variables
-
-All are optional; the agent runs without any of them. See `.env.example` for defaults.
-
-| Variable | Purpose |
-|---|---|
-| `DOCKER_MODEL_BASE_URL` | OpenAI-compatible endpoint for LLM/embeddings |
-| `DOCKER_MODEL_API_KEY` | API key for the endpoint (`none` for local) |
-| `DOCKER_MODEL_NAME` | Chat model for the optional LLM parser |
-| `DOCKER_EMBED_MODEL_NAME` | Embedding model for the vector cache |
-| `DOCKER_EMBED_QUERY_PREFIX` / `DOCKER_EMBED_DOCUMENT_PREFIX` | Model-specific embed prefixes |
-| `DOCKER_EMBED_MAX_INPUT_CHARS` | Max chars per embedding request |
-| `RETRIEVAL_MODE` | `bucket` (default), `legacy`, or `hybrid` |
-| `ASK_POLICY` | `always_ask` (default) or `attribute_cycle` |
-| `CATALOG_PATH` | Catalog path (default `data/catalog.jsonl`) |
-| `AGENT_DEBUG`, `EXPOSURE_GATE`, `RELEASE_TURN`, `OVERRIDE_POLICY`, `IDF_WEIGHT` | Behavior flags for A/B measurement |
-
-API keys are read only from environment variables and are never committed
-(`.env` is gitignored).
->>>>>>> 7c1fd1a (clean up code)
 
 ---
 
@@ -248,39 +174,5 @@ scripts/try_agent.py                     interactive REPL for the full pipeline
 
 ## Data
 
-<<<<<<< HEAD
 Derived from Amazon Reviews 2023 (McAuley Lab, UCSD). See
 [`DATA_ATTRIBUTION.md`](DATA_ATTRIBUTION.md) before using or redistributing.
-=======
-Only exact `parent_asin` equality produces a hit. Core metrics are also reported by scenario.
-
-## Model Choice and Cost
-
-Teams may use any legally accessible LLM API or local model. Teams manage their own credentials and must never commit API keys. Model choice, estimated cost, token usage, and latency must be disclosed. Token usage is a feasibility metric, not part of the core technical score. The organizer does not provide or reimburse model API credits; teams are responsible for any costs incurred through optional external services.
-
-## Files
-
-```text
-data/public_set.jsonl             200 labeled development sessions
-docs/competition_specification.md participant rules and evaluation protocol
-docs/final_evaluation_faq.md      final evaluation and judging clarifications
-docs/agent_api_contract.json      machine-readable Agent contract
-docs/evaluation_config.json       scoring configuration
-docs/baseline_results.json        reproducible weak-starter reference score
-src/agent.py                      our Agent entry point (exports `Agent`)
-src/                              agent pipeline modules
-evaluator/local_evaluator.py      public-set simulator and scorer
-scripts/                          eval, stress-test, demo, and build tooling
-tests/                            unit tests (run with `pytest`)
-```
-
-## Judging and Submission Policy
-
-- Participant submission requirements: `docs/submission_rules.md`
-- Final evaluation FAQ: `docs/final_evaluation_faq.md`
-
-## Data Source
-
-The catalog and sessions are derived from Amazon Reviews 2023 by McAuley Lab, UCSD. See `DATA_ATTRIBUTION.md` before using or redistributing the data.
-Sessions are sampled deterministically from the official Clothing 5-core leave-last-out split and joined to the frozen catalog.
->>>>>>> 7c1fd1a (clean up code)
