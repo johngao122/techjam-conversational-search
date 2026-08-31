@@ -11,27 +11,21 @@ from src.catalog.loader import load_catalog_rows
 
 from .vocab import EXCLUDED_CATEGORY_TERMS
 
-# Query-side tokenization (TOKEN_RE) splits on any non-alphanumeric
-# character and rejoins tokens with a plain space, so catalog terms must be
-# normalized the same way or a literal hyphen ("t-shirts") never matches
-# space-joined query tokens ("t shirts"). 46 catalog category terms contain
-# a hyphen, including "t-shirts" (a top-10 category by product count).
+# Catalog terms must be normalized the same way as query-side tokenization
+# (split on non-alphanumeric, rejoin with a space) or a literal hyphen
+# ("t-shirts") never matches space-joined query tokens ("t shirts").
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
-# Tokenizing with a positive match is measurably cheaper than substituting the
-# separators and splitting: the latter materializes a second copy of every
-# product's full searchable text just to throw it away.
+# Tokenizing with a positive match is cheaper than substituting separators
+# and splitting (which copies every product's searchable text to discard it).
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 _SEARCH_FIELDS = ("title", "features", "description", "details", "categories", "store")
 
 # A single-word store name is only trusted as a brand signal if it's mostly
-# used AS that store, not scattered across many unrelated products as
-# ordinary text. Verified against data/catalog.jsonl: "skechers" (a real,
-# recognizable brand) is store-name for 375 products and appears 388 times
-# total catalog-wide -> ratio 0.97, kept. "machine" is a store name for 1
-# product but appears 10,975 times catalog-wide (almost always from
-# "Machine Wash" care instructions) -> ratio 0.0001, correctly dropped.
+# used AS that store, not scattered across products as ordinary text. E.g.
+# "skechers" (ratio ~0.97) is kept; "machine" (ratio ~0.0001, mostly from
+# "Machine Wash") is dropped.
 BRAND_DISTINCTIVENESS_THRESHOLD = 0.3
 
 
@@ -66,13 +60,9 @@ def load_catalog_vocab(
     `categories` lists.
 
     Brands start from `store` values, then single-word store names are
-    filtered by distinctiveness: (# products whose store IS this word) /
-    (# products whose searchable text CONTAINS this word anywhere) must
-    clear `brand_distinctiveness_threshold`, or the term is dropped -- see
-    BRAND_DISTINCTIVENESS_THRESHOLD. Multi-word store names are kept as-is
-    (this check doesn't extend to phrases); a few residual multi-word
-    collisions with ordinary phrases (e.g. "next level", "watch band"
-    happening to also be tiny store names) are a known limitation."""
+    filtered by distinctiveness (see BRAND_DISTINCTIVENESS_THRESHOLD).
+    Multi-word store names are kept as-is; a few residual collisions with
+    ordinary phrases are a known limitation."""
     rows = load_catalog_rows(str(catalog_path))
 
     categories: set[str] = set()

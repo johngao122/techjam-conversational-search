@@ -1,15 +1,11 @@
 """Verbatim constraint matching against the catalog.
 
-The customer's disclosed constraints are not paraphrases -- they are literal
-slices of the hidden target's own ``features`` and ``details``, normalised the
-same way for every product. So the highest-precision signal available is a
-straight set-membership test: does this exact string appear in this product's
-own attribute set? Within a category bucket that test is close to an identity
-check, and it degrades gracefully through substring and token containment when
-the wording has drifted.
+Disclosed constraints are literal slices of the target's own ``features`` and
+``details``, so the highest-precision signal is a set-membership test: does this
+exact string appear in the product's attribute set? It degrades through substring
+and token containment when wording drifts.
 
-Weights are flat rather than IDF-scaled. IDF was measured worse here (0.962 vs
-0.967) and two other teams reached the same conclusion independently, so
+Weights are flat rather than IDF-scaled (IDF measured worse: 0.962 vs 0.967).
 ``IDF_WEIGHT=1`` keeps the variant runnable for the record without shipping it.
 """
 
@@ -42,22 +38,15 @@ def stem_token(token: str) -> str:
         return token
     return _STEMMER.stem(token)
 _WS_RE = re.compile(r"\s+")
-# True exactly when ``_WS_RE.sub(" ", text)`` would change ``text``: either a
-# run of two or more whitespace characters, or a single whitespace character
-# that is not a plain space (a tab, a newline, or Unicode space such as \xa0).
+# True when ``_WS_RE.sub(" ", text)`` would change ``text``: a run of 2+
+# whitespace chars, or a single whitespace char that is not a plain space.
 _WS_COLLAPSE_NEEDED_RE = re.compile(r"\s\s|[^ \S]")
 
-# Structural punctuation is normalised to whitespace on BOTH sides of every
-# comparison. `details` flatten to "key: value" in the customer's constraint
-# but index as "key value" in the product text; without this every
-# details-derived match silently fails.
+# Structural punctuation normalised to whitespace on both sides of the compare.
+# `details` flatten to "key: value" in constraints but "key value" in the text.
 _PUNCT_RE = re.compile(r"[:%]")
 
-# One pass instead of two. Substituting the punctuation and then collapsing
-# whitespace materializes an intermediate copy of every product's full text at
-# index-build time; folding both classes into a single character class gives a
-# byte-identical result (runs of punctuation and space collapse to one space
-# either way) for half the work.
+# Fold punctuation + whitespace in one pass (byte-identical to two passes).
 _FOLD_RE = re.compile(r"[:%\s]+")
 
 _LABEL_PREFIX_RE = re.compile(r"^\s*color\s*:\s*", re.IGNORECASE)
@@ -76,9 +65,8 @@ def normalize(text: str) -> str:
 def clean_constraint(value: str, limit: int = 180) -> str:
     """Mirror the trimming the simulator applies when it builds a constraint."""
     text = str(value)
-    # The collapse is a no-op for 99.9% of catalog attribute strings, and this
-    # runs ~470k times at index build. Testing whether the sub would change
-    # anything is far cheaper than always allocating a new string.
+    # Runs ~470k times at index build; the collapse is a no-op for almost all
+    # strings, so test-before-substitute is cheaper than always reallocating.
     if text.isascii():
         needed = "  " in text or any(c in text for c in "\t\n\r\v\f")
     else:

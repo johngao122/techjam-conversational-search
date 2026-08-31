@@ -5,15 +5,11 @@ Constraints arrive as strings shaped by the simulator, e.g.:
     "department: womens", "long sleeve", "100% Polyester",
     "High quality mesh for maximum breathability to keep you cool".
 
-Coverage uses *content-token* matching: a constraint is covered when its
-meaningful content tokens appear (word-boundary) in the product's lowercased
-searchable text. Pure-numeric / percentage noise tokens (e.g. "100", "%") are
-ignored so "100% Polyester" matches on "polyester". Budget constraints are
-matched numerically against the product price.
-
-For efficiency each constraint is parsed ONCE into a :class:`ConstraintMatcher`
-(compiled patterns / budget value), then reused across all candidates in a
-``rank()`` call -- avoiding per-candidate regex recompilation.
+Coverage uses content-token matching: a constraint is covered when its content
+tokens appear (word-boundary) in the product's lowercased text. Numeric/percent
+noise is ignored so "100% Polyester" matches "polyester"; budget constraints
+match numerically against price. Each constraint is compiled once into a
+:class:`ConstraintMatcher` and reused across candidates.
 """
 
 from __future__ import annotations

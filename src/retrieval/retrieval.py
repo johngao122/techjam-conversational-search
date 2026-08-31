@@ -1,24 +1,13 @@
-"""BM25 retrieval over the product catalog.
+"""BM25 retrieval over the product catalog, via the shared FTS5 index.
 
-Backed by sqlite3 FTS5 (same engine used by the weak baseline in
-``src/agent.py``), so it adds no new dependencies and scales to the full
-50k-row catalog. A single ``Retriever`` instance builds one in-memory index
-and is safe to reuse across sessions (reads only).
-
-It does **not** build its own index -- it borrows the shared in-memory FTS5
-DB owned by :class:`src.catalog.Catalog`, which is built once at startup.
-
-The public entrypoint is :meth:`Retriever.retrieve_bm25`, which consumes the
-same ``dict[str, list]`` "search key" shape the ledger stores, e.g.::
+Borrows the in-memory FTS5 DB owned by :class:`src.catalog.Catalog`. The
+public entrypoint :meth:`Retriever.retrieve_bm25` consumes the ledger's
+``dict[str, list]`` "search key" shape, e.g.::
 
     {"type": ["jacket"], "price": [{"lte": 30.0}]}
 
-Field values are auto-classified by shape:
-
-* list of **strings**  -> soft, weighted BM25 *text* terms (e.g. ``type``,
-  ``color``, ``material``, ``brand``, ``style``, ``keywords``).
-* list of **dicts** with ``gte``/``lte``/``gt``/``lt``/``eq`` keys -> a
-  *numeric range filter* (e.g. ``price``, ``average_rating``).
+Field values are auto-classified by shape: lists of strings become weighted
+BM25 text terms; lists of ``{op: value}`` dicts become numeric range filters.
 """
 
 from __future__ import annotations
@@ -169,13 +158,11 @@ class Retriever:
         weights: dict[str, float] | None = None,
         field_map: dict[str, tuple[str, ...]] | None = None,
     ) -> "Retriever":
-        """Build a retriever with semantic search enabled *if possible*.
+        """Build a retriever with semantic search enabled if possible.
 
-        Loads the on-disk embedding cache into a :class:`VectorIndex` and
-        constructs an :class:`EmbeddingClient` for query embedding. If numpy /
-        the cache / the endpoint are unavailable, the vector layer is simply
-        left disabled and the retriever behaves exactly like a BM25-only one --
-        :meth:`retrieve_vector` then returns ``[]``.
+        Loads the embedding cache and query-embedding client; if numpy / the
+        cache / the endpoint are unavailable, the vector layer is left disabled
+        and the retriever behaves as BM25-only (``retrieve_vector`` returns []).
         """
         vector_index = None
         embedding_client = None
@@ -220,13 +207,11 @@ class Retriever:
         top_k: int = 10,
         preference_tags: list[str] | None = None,
     ) -> list[str]:
-        """Return up to ``top_k`` ``parent_asin`` strings ranked by weighted
-        BM25, filtered by any numeric range constraints in ``search_key``.
+        """Return up to ``top_k`` ``parent_asin`` ranked by weighted BM25,
+        filtered by any numeric range constraints in ``search_key``.
 
-        Text fields (list-of-strings) drive the weighted BM25 score. Numeric
-        fields (list-of-``{op: value}``) are hard range filters, except that a
-        product with a NULL value for that column always passes (missing price
-        should not exclude a product)."""
+        Text fields drive the BM25 score; numeric fields are hard range
+        filters, but a product with a NULL value for that column always passes."""
         search_key = search_key or {}
 
         match_expression = self._build_match_expression(search_key)
@@ -261,14 +246,12 @@ class Retriever:
         return [str(row[0]) for row in rows]
 
     def retrieve_vector(self, query_text: str, top_k: int = 10) -> list[str]:
-        """Return up to ``top_k`` ``parent_asin`` strings ranked by semantic
-        (cosine) similarity between ``query_text`` and each product's embedding.
+        """Return up to ``top_k`` ``parent_asin`` ranked by cosine similarity
+        between ``query_text`` and each product's embedding.
 
-        This is a standalone semantic path, independent of BM25: it embeds the
-        raw query string and searches the in-memory vector index. Returns an
-        empty list when the vector layer is unavailable (no cache / no numpy /
-        no endpoint) or when embedding the query fails, so callers can fall
-        back to :meth:`retrieve_bm25`.
+        Standalone semantic path, independent of BM25. Returns [] when the
+        vector layer is unavailable or query embedding fails, so callers can
+        fall back to :meth:`retrieve_bm25`.
         """
         if not self.has_vectors:
             return []
@@ -294,11 +277,9 @@ class Retriever:
         """``parent_asin``s whose ``title``/``categories`` prefix-match any of
         ``terms``.
 
-        Used as a hard relevance gate on the whole-catalog fallback (when
-        category bucket resolution fails): unlike ``retrieve_bm25``, whose
-        terms are plain quoted phrase matches, prefix matching here means a
-        singular query term ("dress") still matches plural/inflected catalog
-        text ("dresses") without needing every caller to pre-stem its terms.
+        Hard relevance gate on the whole-catalog fallback. Prefix matching lets
+        a singular query term ("dress") match inflected catalog text ("dresses")
+        without callers pre-stemming their terms.
         """
         cleaned = [t.strip().lower() for t in terms if t and t.strip()]
         if not cleaned:
@@ -322,17 +303,9 @@ class Retriever:
         """Build the FTS5 MATCH expression from the text fields, expanding
         each field's terms into its mapped columns via column-filter syntax.
 
-        Each *distinct term* contributes exactly one clause, whose column
-        set is the union of every field's mapped columns under which that
-        term appears. This matters because SQLite FTS5's ``bm25()`` sums a
-        contribution per matching phrase-clause, not per distinct term: if
-        the same term were emitted as two separate OR'd clauses (e.g. once
-        under a structured field like ``color`` and again under a
-        ``keywords`` catch-all), a row matching both would have that term's
-        contribution double-counted -- an artificial score boost unrelated
-        to actual relevance. Deduping by term keeps each term's bm25
-        contribution counted exactly once regardless of how many fields it
-        was disclosed under."""
+        Each distinct term contributes exactly one clause (column set = union
+        of its fields' mapped columns). Deduping by term avoids double-counting
+        a term's bm25 contribution when it's disclosed under multiple fields."""
         term_columns: dict[str, set[str]] = {}
         term_order: list[str] = []
         for field, value in search_key.items():

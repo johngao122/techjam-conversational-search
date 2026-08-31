@@ -80,13 +80,9 @@ _CLAUSE_BOUNDARY_RE = re.compile(r"[,.;:!]")
 
 
 def _is_negated(lowered_text: str, match_start: int) -> bool:
-    """True if a negation cue ("don't want", "no", "without", ...) appears
-    in a small window immediately before `match_start`, not crossing a
-    clause boundary. Position-aware, clause-bounded (not whole-message) so
-    "I don't want polyester, I love cotton" negates only "polyester" -- a
-    whole-message (or unbounded-window) check would let "don't want" reach
-    across the comma and wrongly suppress the unrelated, genuinely positive
-    "cotton" in the next clause too."""
+    """True if a negation cue appears in a small window immediately before
+    `match_start`, not crossing a clause boundary. Clause-bounded so
+    "I don't want polyester, I love cotton" negates only "polyester"."""
     window = lowered_text[max(0, match_start - NEGATION_WINDOW):match_start]
     boundaries = list(_CLAUSE_BOUNDARY_RE.finditer(window))
     if boundaries:
@@ -101,11 +97,8 @@ _NEGATION_RE = re.compile(
 
 @lru_cache(maxsize=8)
 def _compiled_vocab(vocab: tuple[str, ...]) -> tuple[re.Pattern, tuple[tuple[str, re.Pattern], ...]]:
-    """(combined-alternation, per-term patterns) for a keyword vocabulary.
-
-    Compiled once per vocabulary rather than re-escaped and re-hashed into
-    ``re``'s internal cache on every call.
-    """
+    """(combined-alternation, per-term patterns) for a keyword vocabulary,
+    compiled once per vocabulary rather than re-escaped on every call."""
     return (
         re.compile(r"\b(" + "|".join(re.escape(t) for t in vocab) + r")\b"),
         tuple((t, re.compile(rf"\b{re.escape(t)}\b")) for t in vocab),
@@ -115,16 +108,11 @@ def _compiled_vocab(vocab: tuple[str, ...]) -> tuple[re.Pattern, tuple[tuple[str
 def _all_keyword_hits(lowered_text: str, vocab: tuple[str, ...]) -> tuple[list[str], list[str]]:
     """Returns (all_hits, positive_hits): all matching vocab terms, and the
     subset not preceded by a negation cue. The attribute value is the first
-    *positive* hit (e.g. skip a negated "leather" and use the next real
-    match), but every hit -- negated or not -- must still be claimed, or an
-    unclaimed second match (e.g. "outdoor" claimed as use_case but "work"
-    not, from ".. Outdoor & Work Snow & Cold Weather ..") stays free for a
-    later, wrong classifier (e.g. brand) to grab."""
+    *positive* hit, but every hit must still be claimed so an unclaimed
+    match doesn't stay free for a later, wrong classifier to grab."""
     any_re, patterns = _compiled_vocab(vocab)
-    # Cheap reject: most messages hit none of the ~100 style / ~40 use-case
-    # terms, and one alternation answers that in a single scan. The per-term
-    # loop below still runs in vocab order when it does hit, because callers
-    # depend on the first *positive* hit being the first in vocab order.
+    # Cheap reject before the per-term loop, which runs in vocab order since
+    # callers depend on the first *positive* hit being first in vocab order.
     if not any_re.search(lowered_text):
         return [], []
     all_hits: list[str] = []
@@ -145,11 +133,9 @@ def _match_compound_alias(
     claimed: set[str] | None = None,
 ) -> tuple[str, list[str]] | None:
     """Checks each raw token's compound-alias phrase (e.g. "crossbody" ->
-    "cross body") against `vocab` directly. Deliberately does NOT inject the
-    split fragments ("cross", "body") into the general token stream for
-    n-gram matching — treating them as independent words would let an
-    unrelated single-word match (e.g. a store literally named "Cross")
-    fire on a fragment that only exists because of the alias split."""
+    "cross body") against `vocab` directly. Does NOT inject the split
+    fragments into the token stream, so an unrelated single-word match
+    can't fire on a fragment that only exists because of the alias split."""
     claimed = claimed or set()
     for token in tokens:
         if token in claimed:
@@ -174,19 +160,12 @@ def _match_vocab_ngrams(
 ) -> tuple[str, list[str]] | None:
     """Longest vocab phrase present in `tokens`. Returns (matched_vocab_term,
     original_tokens_matched) — callers must add the *original* tokens (not
-    the matched/pluralized term) to `claimed`, or a singular customer word
-    ("jacket") and its plural catalog match ("jackets") won't be recognized
-    as the same token and a later matcher (e.g. category, after brand) could
-    double-assign it.
+    the matched/pluralized term) to `claimed`.
 
-    `claimed` tokens (already consumed by a higher-priority attribute) are
-    skipped so an ambiguous term like "cotton" (a real material AND a real
-    catalog category) isn't double-assigned. Single-word matches under
-    `min_single_word_len` or in the generic blocklist are skipped (some real
-    store names are plain English words, e.g. "Key", "Not"). Windows whose
-    first/last token is a stopword are skipped too (real vocab terms don't
-    start/end mid-phrase like "the wave" from marketing copy, e.g. "... blue
-    and orange colors of the wave strand bracelet ...")."""
+    `claimed` tokens are skipped so an ambiguous term isn't double-assigned.
+    Single-word matches under `min_single_word_len` or in the generic
+    blocklist are skipped (some real store names are plain English words).
+    Windows whose first/last token is a stopword are skipped too."""
     claimed = claimed or set()
     n = len(tokens)
     for size in range(min(max_n, n), 0, -1):
@@ -248,14 +227,8 @@ class MessageParser:
             result.attributes["feature"] = " ".join(result.keywords[:8])
 
         # "Vague" = an explicit uncertainty phrase, OR no structured slot was
-        # found (only the loose `feature` catch-all, or nothing at all).
-        # Deliberately NOT based on message length/word count: a short reply
-        # like "blue" or "Size 10" carries a real, actionable structured
-        # attribute and is not vague, even though "I want something
-        # comfortable" (longer, but produces only a `feature` catch-all) is.
-        # A message with an explicit uncertainty phrase AND a real attribute
-        # (e.g. "still exploring, but I like blue") stays vague overall while
-        # still keeping the extracted attribute.
+        # found (only the loose `feature` catch-all, or nothing). NOT based on
+        # message length: a short reply like "blue" carries a real attribute.
         structured_keys = set(result.attributes) - {"feature"}
         result.is_vague = pattern_vague or (
             not structured_keys and not result.is_no_preference and not result.is_override
@@ -278,9 +251,8 @@ class MessageParser:
     def _extract_attributes(self, lowered: str, original: str, result: ParsedMessage) -> None:
         claimed: set[str] = set()
 
-        # finditer (not search): a negated first mention ("I don't want
-        # polyester, I love cotton") must not block a genuinely positive
-        # later mention. Every match found is still claimed regardless of
+        # finditer (not search): a negated first mention must not block a
+        # positive later mention. Every match is still claimed regardless of
         # polarity, or the negated word stays free for a later matcher.
         material_value = None
         for match in MATERIAL_RE.finditer(lowered):
@@ -300,9 +272,7 @@ class MessageParser:
         if color_value:
             result.attributes["color"] = color_value
 
-        # finditer + skip: raw catalog text labels a physical dimension the
-        # same way it labels a real size ("Size: 2.5'' in length" vs
-        # "Size 10") -- a unit marker right after the number means it's a
+        # A unit marker right after the number means it's a physical
         # dimension, not a garment/shoe size. See SIZE_UNIT_MARKER_RE.
         numeric_size = None
         for match in SIZE_NUMERIC_RE.finditer(lowered):
@@ -344,11 +314,9 @@ class MessageParser:
 
         tokens = [t.lower() for t in TOKEN_RE.findall(lowered)]
 
-        # Category before brand: a word coincidentally matching both a real
-        # store name and a real category (e.g. "jacket"/"Jackets") almost
-        # always reflects category intent, not a store mention. Compound
-        # alias ("crossbody" -> "cross body") is tried first since it's a
-        # more specific signal than generic n-gram matching.
+        # Category before brand: a word matching both a store name and a
+        # category almost always reflects category intent. Compound alias is
+        # tried first since it's a more specific signal than n-gram matching.
         if self.known_categories:
             category_match = _match_compound_alias(tokens, self.known_categories, claimed=claimed) \
                 or _match_vocab_ngrams(tokens, self.known_categories, claimed=claimed)

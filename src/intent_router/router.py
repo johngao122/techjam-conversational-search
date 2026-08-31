@@ -14,10 +14,8 @@ _parser: MessageParser | None = None
 def warm_parser(catalog_path: str | None = None) -> MessageParser:
     """Build the vocab-backed parser eagerly.
 
-    The vocab scan costs seconds over a 50k-row catalog. Left lazy it landed
-    inside the first ``respond()`` call, turning turn 1 of session 1 into a
-    multi-second outlier; ``Agent.__init__`` calls this so the cost is paid at
-    construction alongside the FTS5 index build instead.
+    The vocab scan costs seconds over a 50k-row catalog; ``Agent.__init__`` calls
+    this so the cost is paid at construction rather than on the first ``respond()``.
     """
     global _parser
     if _parser is None:
@@ -47,11 +45,9 @@ def extract_attributes(message: str) -> dict:
     Extract structured attributes from a user message.
     Returns a dict with keys matching KIV fields where detected.
 
-    ``feature`` is still filtered here for the legacy BM25 path (keeping it
-    byte-identical to the recorded 0.680 control). The bucket pipeline does not
-    consume these taxonomy attributes at all -- it ranks against the verbatim
-    ConstraintMemory, which is exactly where the dropped ``feature`` strings are
-    now retained (see src/intent_router/constraint_memory.py).
+    ``feature`` is filtered here for the legacy BM25 path. The bucket pipeline
+    ranks against the verbatim ConstraintMemory instead, where the dropped
+    ``feature`` strings are retained (see src/intent_router/constraint_memory.py).
     """
     return attributes_of(parse_message(message))
 

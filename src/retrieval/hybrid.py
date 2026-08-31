@@ -70,11 +70,9 @@ class HybridRetriever:
             2. BM25 and vector search run IN PARALLEL on the filtered pool
             3. RRF fuse results
 
-        ``constraints`` are the verbatim disclosed constraint strings (e.g.
-        "Material:alloy") used as a hard pre-filter before both searches.
-
-        Returns ``[]`` when both searches find nothing, allowing the caller
-        to fall back to the popularity list.
+        ``constraints`` are verbatim disclosed constraint strings used as a
+        hard pre-filter before both searches. Returns ``[]`` when both searches
+        find nothing, so the caller can fall back to the popularity list.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -152,10 +150,8 @@ class HybridRetriever:
 
         parallel_time = time.time() - start_parallel
 
-        # Step 3: RRF fuse — includes constraint ranking as a third signal
-        # The constraint-filtered pool is already sorted by constraint score,
-        # so include it as a ranked list to give high-constraint-match products
-        # a boost even if BM25/vector rank them poorly.
+        # Step 3: RRF fuse — constraint pool (already sorted by score) is
+        # included as a third ranked list to boost high-constraint matches.
         start_rrf = time.time()
         if not bm25_ranked and not vector_ranked:
             # Both failed: return filtered pool ordered by constraint score if available
@@ -169,16 +165,13 @@ class HybridRetriever:
             _LOG.debug(f"retrieve empty: total={total_time:.3f}s")
             return result
 
-        # Build weighted ranked lists for RRF:
-        # Constraint signal is most reliable (verbatim match on disclosed attributes)
-        # BM25/vector are secondary signals that can help with tiebreaking
+        # Build weighted ranked lists for RRF. Constraint signal is most
+        # reliable (verbatim attribute match); BM25/vector aid tiebreaking.
         # Format: (ranked_list, weight)
         constraint_w, bm25_w, vector_w = self._rrf_weights
         weighted_lists: list[tuple[list[str], float]] = []
         if filtered_pool:
-            # Constraint gets the highest weight - it's the ground truth signal
             weighted_lists.append((filtered_pool[:self._pool_size], constraint_w))
-        # BM25 and vector get lower weights
         weighted_lists.append((bm25_ranked, bm25_w))
         weighted_lists.append((vector_ranked, vector_w))
 
@@ -195,12 +188,9 @@ class HybridRetriever:
     ) -> list[str] | None:
         """Pre-filter products by category bucket AND constraints.
 
-        First narrows to the category bucket (like bucket mode), then scores
-        by constraint match. This gives much better precision than scoring
-        all 50k products by constraint alone.
-
-        Returns a list of ASINs ordered by constraint score, then popularity.
-        Returns None if no constraint index or no constraints.
+        Narrows to the category bucket first, then scores by constraint match
+        for better precision than scoring all 50k products. Returns ASINs
+        ordered by constraint score then popularity, or None when unavailable.
         """
         start = time.time()
         if self._constraint_index is None:
@@ -211,8 +201,7 @@ class HybridRetriever:
         from src.retrieval.constraint_index import is_inert, prepare
         from src.retrieval.buckets import BucketIndex, parse_category
 
-        # Step 1: Get category bucket from opening message using FUZZY resolution
-        # This handles paraphrased openings like "some novelty women today" -> "novelty women"
+        # Step 1: Get category bucket via fuzzy resolution (handles paraphrased openings).
         start_bucket = time.time()
         category_pool: set[str] | None = None
         if opening_message and self._bucket_index is not None:
@@ -285,14 +274,9 @@ class HybridRetriever:
     def build_constraint_query(session: dict, opening_message: str = "") -> str:
         """Build a semantic vector query from structured session state.
 
-        Uses intent + current constraints rather than raw message history.
-        The vector index embeds title/categories/description — not attributes —
-        so the query should match that register. History concatenation was
-        replaced because attribute-dump turns ("polyester; Cotton,Spandex") are
-        useless in the embedding space and stale pre-override turns corrupt intent.
-
-        Intent is mapped to natural language phrases the embedding space
-        understands. boundary/intent_override carry no useful phrase.
+        Uses intent + current constraints (not raw history) to match the
+        title/categories/description register the vector index embeds. Intent
+        is mapped to natural-language phrases the embedding space understands.
         """
         _INTENT_PHRASES = {
             "buying": "looking to buy",
@@ -339,10 +323,8 @@ class HybridRetriever:
         """Weighted Reciprocal Rank Fusion.
 
         ``score(d) = Σ weight * 1 / (k + rank(d))`` where rank is 1-indexed.
-        ASINs absent from a list contribute 0 from that list.
-
-        This allows giving higher weight to more reliable signals (e.g.,
-        constraint matching is more reliable than BM25/vector for this dataset).
+        ASINs absent from a list contribute 0. Higher weights favour more
+        reliable signals (constraint match over BM25/vector here).
         """
         scores: dict[str, float] = {}
         for ranked, weight in weighted_lists:

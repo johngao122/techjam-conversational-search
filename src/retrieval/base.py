@@ -1,14 +1,10 @@
 """Uniform retrieval boundary.
 
-Every retrieval method (BM25, category bucket, verbatim constraint index, and
-any future dense/vector retriever) presents the *same* shape to the reranker: a
-:class:`RetrievalStrategy` that turns a :class:`RetrievalRequest` into a
-:class:`RetrievalResult`. The reranker consumes only that result and stays
-ignorant of *how* the candidate pool was produced or how many methods exist.
-
-Adding a new method (e.g. ``VectorStrategy``) is: implement the one-method
-:class:`RetrievalStrategy` protocol and slot it into the pipeline -- no change
-to the reranker.
+Every retrieval method presents the same shape to the reranker: a
+:class:`RetrievalStrategy` turning a :class:`RetrievalRequest` into a
+:class:`RetrievalResult`. The reranker consumes only that result, ignorant of
+how the pool was produced. New methods implement the protocol and slot into
+the pipeline with no reranker change.
 """
 
 from __future__ import annotations

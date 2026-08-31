@@ -9,18 +9,15 @@ own metadata, wrapped in a small set of fixed reply templates
     any turn:         "For that, what matters is: {c1}; {c2}."
     override turn:    "Actually, ignore my earlier preference. What I need is: {c}."
 
-The single highest-value signal is therefore the *verbatim* constraint string,
-not its taxonomy classification. We extract those strings by splitting on the
-template markers (punctuation/whitespace-tolerant so a reworded private-set
-template still yields the payload) and accumulate them per session.
+The highest-value signal is the *verbatim* constraint string, not its taxonomy
+classification. We extract those by splitting on the template markers
+(punctuation/whitespace-tolerant) and accumulate them per session.
 
 Supersession is "evict on value conflict": a prior constraint is dropped only
-when a new one names the SAME closed-vocabulary attribute (material/color) with
-a DIFFERENT value ("cotton" -> "leather"). Different attributes, or open-ended
-feature text with no extractable value, are always kept -- "Buckle closure" and
-"Rubber sole" are both true at once. This was the only supersession policy
-measured free on the real override distribution while still correct under a
-genuine mind-change.
+when a new one names the SAME attribute with a DIFFERENT value
+("cotton" -> "leather"). Different attributes, or open-ended feature text with
+no extractable value, are always kept ("Buckle closure" and "Rubber sole"
+coexist).
 """
 
 from __future__ import annotations
@@ -28,8 +25,7 @@ from __future__ import annotations
 import os
 import re
 
-# Closed vocabularies the evaluator's own MATERIAL_RE / COLOR_RE use
-# (local_evaluator.py:21-24). ``values()`` extracts only from these, so two
+# Closed vocabularies the evaluator's own MATERIAL_RE / COLOR_RE use. So two
 # open-ended feature strings never conflict.
 _MATERIALS = ("cotton", "polyester", "nylon", "leather", "wool", "spandex",
               "silk", "rayon", "fabric")
@@ -128,17 +124,9 @@ _KEY_STOP = {"color", "colour"}
 def _values(constraint: str) -> frozenset[tuple[str, str]]:
     """(attribute, value) pairs a constraint names, for conflict detection.
 
-    Two independent signals, unioned:
-
-    1. Generic ``key: value`` parse -- vocabulary-free, so a brand-new attribute
-       ("Sole Material: Rubber", "Waterproof Rating: 10000mm") still yields a
-       comparable pair and a genuine mind-change over it is caught.
-    2. Closed material/color vocab -- catches bare values disclosed without a
-       key ("cotton", "blue"), which the evaluator emits for its two headline
-       attributes.
-
-    Open-ended feature text with neither a key nor a closed value returns empty,
-    so two such strings never conflict ("Buckle closure" vs "Rubber sole").
+    Unions two signals: (1) a vocabulary-free ``key: value`` parse, and
+    (2) closed material/color vocab for bare values. Open-ended feature text
+    with neither returns empty, so two such strings never conflict.
     """
     pairs: set[tuple[str, str]] = set()
 
@@ -162,9 +150,8 @@ def _values(constraint: str) -> frozenset[tuple[str, str]]:
 def _value_tokens(values: set[str]) -> set[str]:
     """Content tokens of an attribute's value strings (len>2), for overlap.
 
-    Comparing on tokens rather than whole strings means "cotton" and
-    "cotton blend" share ``cotton`` and so do NOT conflict, while "cotton" and
-    "leather" share nothing and do -- without needing either value in a list.
+    Token comparison means "cotton" and "cotton blend" overlap (no conflict),
+    while "cotton" and "leather" don't -- without needing either in a list.
     """
     tokens: set[str] = set()
     for value in values:
@@ -181,11 +168,9 @@ def _conflicts(prior: str, new: str) -> bool:
     """True iff ``new`` supersedes ``prior`` by naming the same attribute with a
     disjoint value (a genuine value-level contradiction).
 
-    Same attribute + overlapping value tokens ("cotton" / "cotton blend") is a
-    refinement, not a contradiction -> kept. Same attribute + disjoint tokens
-    ("cotton" / "leather", "Sole Material: Rubber" / "Sole Material: Leather")
-    is a real mind-change -> the prior is evicted. Different attributes, or a
-    value with no comparable tokens, never conflict.
+    Same attribute + overlapping tokens ("cotton" / "cotton blend") is a
+    refinement (kept); same attribute + disjoint tokens ("cotton" / "leather")
+    is a mind-change (prior evicted). Different attributes never conflict.
     """
     pv, nv = _values(prior), _values(new)
     if not pv or not nv:
@@ -202,9 +187,8 @@ def _conflicts(prior: str, new: str) -> bool:
 
 
 def _policy() -> str:
-    """Supersession policy, selectable for the A/B record. Ships
-    ``evict_on_conflict`` -- the only policy measured free on the real override
-    distribution while strictly better under a genuine contradiction."""
+    """Supersession policy, selectable via ``OVERRIDE_POLICY``. Ships
+    ``evict_on_conflict``."""
     return os.environ.get("OVERRIDE_POLICY", "evict_on_conflict").strip() or "evict_on_conflict"
 
 
