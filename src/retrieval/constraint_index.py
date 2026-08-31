@@ -124,14 +124,17 @@ def prepare(constraint: str) -> tuple[str, tuple[str, ...]]:
 class ConstraintIndex:
     """Per-product attribute sets and text, plus the popularity prior."""
 
-    def __init__(self, rows) -> None:
+    def __init__(self, rows, use_idf: bool | None = None) -> None:
         self.attributes: dict[str, set[str]] = {}
         self.text: dict[str, str] = {}
         self.popularity: dict[str, float] = {}
         self._document_frequency: dict[str, int] = {}
-        # Only ``_exact_weight`` reads this, and only under IDF_WEIGHT=1.
+        # Only ``_exact_weight`` reads this, and only under IDF weighting.
         # Building it unconditionally is a 50k-product tally nobody looks at.
-        use_idf = os.environ.get("IDF_WEIGHT", "") == "1"
+        # ``use_idf`` comes from AgentConfig; ``None`` falls back to the env var
+        # so bare ``IDF_WEIGHT=1 python …`` still works.
+        if use_idf is None:
+            use_idf = os.environ.get("IDF_WEIGHT", "") == "1"
         for product in rows:
             asin = str(product["parent_asin"])
             attributes = flatten_attributes(product)

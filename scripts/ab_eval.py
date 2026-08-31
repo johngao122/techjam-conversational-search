@@ -29,11 +29,14 @@ RUNS = Path(__file__).resolve().parent.parent / "runs"
 # Env flags that define a configuration. Recorded with every run so a result
 # can always be traced back to the exact switch settings that produced it.
 CONFIG_FLAGS = (
+    "PARSER_MODE",
     "RETRIEVAL_MODE",
+    "ASK_POLICY",
     "IDF_WEIGHT",
     "EXPOSURE_GATE",
     "RELEASE_TURN",
     "OVERRIDE_POLICY",
+    "THETA",
 )
 
 

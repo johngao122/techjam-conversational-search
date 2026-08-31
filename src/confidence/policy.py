@@ -67,16 +67,30 @@ def release_turn() -> int:
     return int(raw) if raw.isdigit() else RELEASE_TURN
 
 
-def exposure(turn: int, exhausted: bool, top_k: int) -> int:
+def exposure(
+    turn: int,
+    exhausted: bool,
+    top_k: int,
+    *,
+    enabled: bool | None = None,
+    release: int | None = None,
+) -> int:
     """How many recommendations to reveal this turn.
 
     Full list once we release (turn >= RELEASE_TURN), when the customer says the
     card is drained, or on the final turn (never withhold at turn 10 -- that
     truncation loses winnable sessions outright). Otherwise a single candidate.
+
+    ``enabled`` / ``release`` come from AgentConfig; ``None`` falls back to the
+    ``EXPOSURE_GATE`` / ``RELEASE_TURN`` env vars.
     """
-    if not exposure_enabled():
+    if enabled is None:
+        enabled = exposure_enabled()
+    if release is None:
+        release = release_turn()
+    if not enabled:
         return top_k
-    if turn >= release_turn() or exhausted or turn >= FINAL_TURN:
+    if turn >= release or exhausted or turn >= FINAL_TURN:
         return top_k
     return CONFIDENT_EXPOSURE
 

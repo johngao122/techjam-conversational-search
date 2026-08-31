@@ -344,12 +344,12 @@ class Reranker:
         )
 
 
-def build_reranker(catalog_path: str) -> Reranker:
+def build_reranker(catalog_path: str, idf_weight: bool | None = None) -> Reranker:
     catalog = Catalog(catalog_path)
     retriever = Retriever(catalog)
     # The bucket + verbatim-constraint indexes share the lru_cached catalog
     # rows, so building them here is one extra pass over already-parsed data.
     rows = load_catalog_rows(str(catalog_path))
     bucket_index = BucketIndex(rows)
-    constraint_index = ConstraintIndex(rows)
+    constraint_index = ConstraintIndex(rows, use_idf=idf_weight)
     return Reranker(catalog, retriever, bucket_index, constraint_index)
