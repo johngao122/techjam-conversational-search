@@ -1,44 +1,36 @@
 sequenceDiagram
     participant U as User
-    participant IR as Intent Router
-    participant KIV as KIV Check
-    participant L as Ledger
-    participant BM as BM25
-    participant RR as Reranker
-    participant DE as Decision
-    participant R as Response
+    participant A as Agent
+    participant IR as IntentRouter
+    participant LS as LedgerService
+    participant SL as SessionLedger
+    participant CM as ConstraintMemory
+    participant BI as BucketIndex
+    participant CI as ConstraintIndex
+    participant OF as OutputFormatter
 
-    U->>IR: User Message (turn N)
-    IR->>IR: Detect Scenario
-    IR->>KIV: Route with scenario type
+    U->>A: respond(session_id, message, turn)
+    A->>IR: parse_message(message)
+    IR-->>A: ParsedMessage(intent, attributes)
     
-    KIV->>KIV: Check required fields
-    KIV->>KIV: Check turn limit
+    A->>LS: set_constraint() for each attribute
+    A->>SL: observe() - detect "no more preferences"
+    A->>CM: add_message() - extract verbatim constraints
     
-    alt Turn > 10
-        KIV->>R: Force recommend
-    else Turn <= 10
-        KIV->>L: Update ledger
+    A->>BI: resolve(opening_message)
+    BI-->>A: pool of ~180 products
+    
+    A->>CI: rank(pool, constraints)
+    CI-->>A: ranked list by match + popularity
+    
+    alt User has more preferences AND turn < 10
+        A->>A: ask_attribute = "other"
+    else User said "no more" OR turn >= 10
+        A->>A: ask_attribute = None
     end
     
-    L->>L: Store session_id, search_key, attributes
-    L->>BM: Pass search query
+    A->>A: exposure(turn) -> how many to show
+    A->>OF: format(recommendations)
+    OF-->>A: response dict
     
-    BM->>BM: Build query from ledger
-    BM->>BM: Execute FTS5 search
-    BM->>RR: Return top 100 candidates
-    
-    RR->>RR: Extract features per candidate
-    RR->>RR: Apply feature importance weights
-    RR->>RR: Calculate final scores
-    RR->>DE: Pass ranked results + confidence
-    
-    alt Confidence < Threshold
-        DE->>R: Return clarifying question
-        R->>U: What size do you prefer?
-    else Confidence >= Threshold
-        DE->>R: Return top 10 recommendations
-        R->>U: Here are my top 10 picks!
-    end
-    
-    Note over U,R: Loop until HIT or Turn 10
+    A-->>U: {message, ask_attribute, recommendations}
