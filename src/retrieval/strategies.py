@@ -14,12 +14,16 @@ belongs to, so the reranker owns no retrieval state.
 
 from __future__ import annotations
 
+import logging
+
 from src.retrieval.base import RetrievalRequest, RetrievalResult
-from src.retrieval.buckets import BucketIndex
+from src.retrieval.buckets import BucketIndex, head_noun_token
 from src.retrieval.constraint_index import ConstraintIndex, is_inert, prepare
 from src.retrieval.retrieval import Retriever
 
 DEFAULT_POOL = 200
+
+logger = logging.getLogger(__name__)
 
 # Prepared constraint triples: (normalised, tokens, weight).
 PreparedConstraints = list[tuple[str, tuple[str, ...], float]]
@@ -147,6 +151,13 @@ class BucketPipeline:
     def candidates(self, request: RetrievalRequest) -> RetrievalResult:
         bucket_result = self._bucket.candidates(request)
         pool = bucket_result.candidates
+        logger.debug(
+            "pipeline | opening=%r resolved=%s resolved_exact=%s pool=%d",
+            request.opening_message[:60],
+            bucket_result.resolved,
+            bucket_result.resolved_exact,
+            len(pool),
+        )
 
         # Rung 3: category unresolved -> narrow the whole-catalog pool with a
         # BM25 pass over the accumulated transcript. Only when a transcript is
@@ -155,6 +166,28 @@ class BucketPipeline:
             bm25_pool = self._bm25.search(request.transcript, DEFAULT_POOL)
             if bm25_pool:
                 pool = bm25_pool
+            logger.debug("title_gate | bucket unresolved, BM25 pool size=%d", len(pool))
+
+            # Title-relevance gate: hard-require the disclosed type word to
+            # appear (prefix match) in the candidate's own title/categories.
+            # Prevents off-type products with strong matches elsewhere from
+            # winning. Degrades to the unfiltered pool if nothing passes.
+            head = head_noun_token(request.opening_message)
+            if head:
+                relevant = self._bm25._retriever.title_relevant_ids({head})
+                gated = [pid for pid in pool if pid in relevant]
+                logger.debug(
+                    "title_gate | head=%r relevant=%d gated=%d/%d %s",
+                    head,
+                    len(relevant),
+                    len(gated),
+                    len(pool),
+                    "APPLIED" if gated else "SKIPPED (empty)",
+                )
+                if gated:
+                    pool = gated
+            else:
+                logger.debug("title_gate | no head noun parsed from opening message, gate skipped")
 
         prepared = prepare_constraints(request.constraints)
 
