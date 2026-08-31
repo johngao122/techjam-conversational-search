@@ -1,7 +1,13 @@
-# Core dependencies
-python-dotenv>=1.0.0
-google-generativeai>=0.3.0
+# Runtime — needed to construct the Agent and run the evaluator
+python-dotenv>=1.0.0     # evaluator loads a local .env if one is present
+ollama>=0.3.0            # imported by src/agent.py; the summariser it feeds stays
+                        # dormant (falls back to a deterministic string) with no
+                        # Ollama server running, which is how every result was measured
+numpy>=1.24             # dense-retrieval helpers (inactive without an embedding cache)
 
-# Existing project dependencies
+# Optional — only for the local LLM message parser / embedding endpoint,
+# neither of which is on the scored path
 openai>=1.0.0
+
+# Testing
 pytest>=7.0.0
