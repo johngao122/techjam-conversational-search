@@ -21,6 +21,11 @@ Usage::
     python3 scripts/paraphrase_stress.py --level mild
     python3 scripts/paraphrase_stress.py --level none --min-score 0.96
     python3 scripts/paraphrase_stress.py --level aggressive --output runs/stress.json
+
+    # Run against a freshly drawn dataset (unseen parent_asins, not the
+    # public_set.jsonl targets) instead of the checked-in public set:
+    python3 scripts/paraphrase_stress.py --regenerate --dataset data/paraphrase_set.jsonl
+    python3 scripts/paraphrase_stress.py --regenerate --dataset data/paraphrase_set.jsonl --seed 20260831
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import evaluator.local_evaluator as ev  # noqa: E402
 from src.agent import Agent  # noqa: E402
+from scripts.generate_paraphrase_dataset import generate as generate_dataset  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -127,7 +133,21 @@ def main() -> None:
     parser.add_argument("--output", default=None, help="write full result JSON here")
     parser.add_argument("--min-score", type=float, default=0.80,
                         help="pass/fail threshold on recommended_technical_score")
+    parser.add_argument("--regenerate", action="store_true",
+                        help="generate a fresh dataset (unseen parent_asins, not the "
+                             "public_set.jsonl targets) via generate_paraphrase_dataset.py "
+                             "and write it to --dataset before running")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="seed for --regenerate; omit for a non-reproducible draw")
     args = parser.parse_args()
+
+    if args.regenerate:
+        generate_dataset(
+            catalog=args.catalog,
+            public_set="data/public_set.jsonl",
+            output=args.dataset,
+            seed=args.seed,
+        )
 
     # Preserve the originals so level=none is a true passthrough.
     ev._ORIG_INITIAL = ev.initial_message
