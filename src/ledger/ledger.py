@@ -31,6 +31,7 @@ def _empty_entry(session_id: str, user_profile: dict) -> dict:
         "search_key": {},
         "llm_search_key": {},
         "conversation_summary": "",
+        "price_constraint": None,
     }
 
 
