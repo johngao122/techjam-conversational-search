@@ -139,6 +139,9 @@ def main() -> None:
                              "and write it to --dataset before running")
     parser.add_argument("--seed", type=int, default=None,
                         help="seed for --regenerate; omit for a non-reproducible draw")
+    parser.add_argument("--num-samples", type=int, default=200,
+                        help="total sessions for --regenerate, split across scenario "
+                             "types in public_set.jsonl's proportions (default: 200)")
     args = parser.parse_args()
 
     if args.regenerate:
@@ -147,6 +150,7 @@ def main() -> None:
             public_set="data/public_set.jsonl",
             output=args.dataset,
             seed=args.seed,
+            num_samples=args.num_samples,
         )
 
     # Preserve the originals so level=none is a true passthrough.

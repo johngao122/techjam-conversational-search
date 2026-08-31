@@ -26,12 +26,42 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-SCENARIO_COUNTS = {
-    "buying": 80,
-    "browsing": 80,
-    "intent_override": 30,
-    "boundary": 10,
+DEFAULT_NUM_SAMPLES = 200
+
+# Matches the public_set.jsonl split (80 buying / 80 browsing / 30 intent_override
+# / 10 boundary out of 200) -- scaled to whatever total is requested.
+SCENARIO_RATIOS = {
+    "buying": 0.40,
+    "browsing": 0.40,
+    "intent_override": 0.15,
+    "boundary": 0.05,
 }
+
+
+def scenario_counts(num_samples: int) -> dict[str, int]:
+    if num_samples < len(SCENARIO_RATIOS):
+        raise SystemExit(
+            f"--num-samples must be at least {len(SCENARIO_RATIOS)} "
+            f"(one per scenario type), got {num_samples}"
+        )
+    raw = {name: ratio * num_samples for name, ratio in SCENARIO_RATIOS.items()}
+    counts = {name: max(1, int(value)) for name, value in raw.items()}
+    remainder = num_samples - sum(counts.values())
+    # Largest-remainder method: hand out leftover slots to the scenarios
+    # whose fractional part was closest to rounding up.
+    order = sorted(raw, key=lambda name: raw[name] - int(raw[name]), reverse=True)
+    index = 0
+    while remainder > 0:
+        counts[order[index % len(order)]] += 1
+        remainder -= 1
+        index += 1
+    while remainder < 0:
+        candidate = order[index % len(order)]
+        if counts[candidate] > 1:
+            counts[candidate] -= 1
+            remainder += 1
+        index += 1
+    return counts
 
 PREFERENCE_TAG_POOL = (
     "fit", "comfort", "durability", "style", "warmth", "weather",
@@ -117,9 +147,10 @@ def build_user_profile(rng: random.Random) -> dict:
     }
 
 
-def build_sessions(products: list[dict], rng: random.Random) -> list[dict]:
+def build_sessions(products: list[dict], rng: random.Random, num_samples: int = DEFAULT_NUM_SAMPLES) -> list[dict]:
+    counts = scenario_counts(num_samples)
     scenario_pool: list[str] = []
-    for scenario, count in SCENARIO_COUNTS.items():
+    for scenario, count in counts.items():
         scenario_pool.extend([scenario] * count)
     rng.shuffle(scenario_pool)
 
@@ -149,13 +180,14 @@ def generate(
     public_set: str | Path,
     output: str | Path,
     seed: int | None = None,
+    num_samples: int = DEFAULT_NUM_SAMPLES,
 ) -> list[dict]:
     """Build and write a fresh dataset; returns the sessions written."""
     rng = random.Random(seed) if seed is not None else random.Random()
 
     exclude = used_parent_asins(Path(public_set))
     products = usable_products(Path(catalog), exclude)
-    sessions = build_sessions(products, rng)
+    sessions = build_sessions(products, rng, num_samples)
 
     output_path = Path(output)
     with output_path.open("w", encoding="utf-8") as handle:
@@ -175,8 +207,12 @@ def main() -> None:
     parser.add_argument("--output", default=str(REPO_ROOT / "data" / "paraphrase_set.jsonl"))
     parser.add_argument("--seed", type=int, default=None,
                         help="omit for a fresh, non-reproducible draw each run")
+    parser.add_argument("--num-samples", type=int, default=DEFAULT_NUM_SAMPLES,
+                        help=f"total sessions to generate, split across scenario types "
+                             f"in the same proportions as public_set.jsonl "
+                             f"(default: {DEFAULT_NUM_SAMPLES})")
     args = parser.parse_args()
-    generate(args.catalog, args.public_set, args.output, args.seed)
+    generate(args.catalog, args.public_set, args.output, args.seed, args.num_samples)
 
 
 if __name__ == "__main__":
