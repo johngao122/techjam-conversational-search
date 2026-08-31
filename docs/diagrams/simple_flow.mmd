@@ -2,7 +2,7 @@ flowchart LR
     A[User Message] --> B[Intent Router]
     B --> C[State Management]
     C --> D[BucketIndex]
-    D --> E[ConstraintIndex]
+    D --> E[Reranker]
     E --> F{"No more prefs<br/>OR turn >= 10?"}
     F -->|No| G[Keep asking]
     F -->|Yes| H[Stop asking]

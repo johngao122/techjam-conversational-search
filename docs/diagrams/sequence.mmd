@@ -6,7 +6,7 @@ sequenceDiagram
     participant SL as SessionLedger
     participant CM as ConstraintMemory
     participant BI as BucketIndex
-    participant CI as ConstraintIndex
+    participant RR as Reranker
     participant OF as OutputFormatter
 
     U->>A: respond(session_id, message, turn)
@@ -20,8 +20,9 @@ sequenceDiagram
     A->>BI: resolve(opening_message)
     BI-->>A: pool of ~180 products
     
-    A->>CI: rank(pool, constraints)
-    CI-->>A: ranked list by match + popularity
+    A->>RR: rank_bucket(opening, constraints)
+    Note right of RR: ConstraintIndex scores pool<br/>(exact 3.0, substring 1.0, token 0.5)
+    RR-->>A: ranked list by score + popularity
     
     alt User has more preferences AND turn < 10
         A->>A: ask_attribute = "other"

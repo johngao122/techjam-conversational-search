@@ -20,7 +20,14 @@ flowchart TB
 
     subgraph RETRIEVAL["Retrieval"]
         BI[BucketIndex]
+    end
+
+    subgraph RERANKER["Reranker"]
         CI[ConstraintIndex]
+        SC["Score: exact 3.0 | substr 1.0 | token 0.5"]
+        SO[Sort: score desc, popularity desc]
+        CI --> SC
+        SC --> SO
     end
 
     subgraph QUESTION["Question Decision"]
@@ -41,7 +48,7 @@ flowchart TB
     LS --> SL
     CM --> BI
     BI --> CI
-    CI --> QD
+    SO --> QD
     ASK --> EG
     STOP --> EG
     EG --> OF

@@ -29,7 +29,13 @@ User Message
 +----------------------+
 |      Retrieval       |
 |  - BucketIndex       |  <- Category -> ~180 product pool
-|  - ConstraintIndex   |  <- Rank by verbatim match + popularity
++----------------------+
+    |
+    v
++----------------------+
+|      Reranker        |
+|  - ConstraintIndex   |  <- Score by verbatim match (3-tier)
+|                      |  <- Sort by score desc, popularity desc
 +----------------------+
     |
     v
@@ -81,8 +87,12 @@ flowchart TD
 
     subgraph RETRIEVAL["RETRIEVAL"]
         BI[BucketIndex: category -> ~180 products]
-        CI[ConstraintIndex: rank by match + popularity]
-        BI --> CI
+    end
+
+    subgraph RERANKER["RERANKER"]
+        CI[ConstraintIndex: 3-tier scoring]
+        CI2[Sort: score desc, popularity desc]
+        CI --> CI2
     end
 
     subgraph QUESTION["QUESTION DECISION"]
@@ -106,7 +116,8 @@ flowchart TD
     LS --> SL
     SL --> CM
     CM --> BI
-    CI --> QD
+    BI --> CI
+    CI2 --> QD
     ASK --> EG
     STOP --> EG
     EG --> OF
@@ -122,7 +133,7 @@ flowchart LR
     A[User Message] --> B[Intent Router]
     B --> C[State Management]
     C --> D[BucketIndex]
-    D --> E[ConstraintIndex]
+    D --> E[Reranker]
     E --> F{User exhausted?}
     F -->|No| G[Keep asking]
     F -->|Yes| H[Stop asking]
@@ -144,7 +155,7 @@ sequenceDiagram
     participant SL as SessionLedger
     participant CM as ConstraintMemory
     participant BI as BucketIndex
-    participant CI as ConstraintIndex
+    participant RR as Reranker
     participant OF as OutputFormatter
 
     U->>A: respond(session_id, message, turn)
@@ -158,8 +169,9 @@ sequenceDiagram
     A->>BI: resolve(opening_message)
     BI-->>A: pool of ~180 products
     
-    A->>CI: rank(pool, constraints)
-    CI-->>A: ranked list by match + popularity
+    A->>RR: rank_bucket(opening, constraints)
+    Note right of RR: ConstraintIndex scores pool<br/>(exact 3.0, substring 1.0, token 0.5)
+    RR-->>A: ranked list by score + popularity
     
     alt User NOT exhausted AND turn < 10
         A->>A: ask_attribute = "other"
@@ -204,8 +216,17 @@ Maps opening message category to a product bucket.
 2. Resolve to bucket key via exact match, containment, or token overlap
 3. Return pool of ~180 products (vs 50k whole catalog)
 
-### 4. ConstraintIndex (`src/retrieval/constraint_index`)
-Scores products by **verbatim constraint matching**.
+### 4. Reranker (`src/reranker/rank.py`)
+Orchestrates scoring and ranking of the candidate pool.
+
+**Entry point:** `rank_bucket(opening_message, constraints)` calls:
+1. `BucketPipeline.candidates()` - gets the pool from BucketIndex
+2. `score_by_constraints()` - scores using ConstraintIndex
+
+**Internally uses ConstraintIndex** for the actual scoring logic.
+
+### 5. ConstraintIndex (`src/retrieval/constraint_index`)
+The scoring engine used by the Reranker. Scores products by **verbatim constraint matching**.
 
 **Scoring tiers:**
 - Exact match (3.0): constraint string in product's attributes
@@ -214,7 +235,7 @@ Scores products by **verbatim constraint matching**.
 
 **Final ranking:** constraint_score desc, then popularity desc
 
-### 5. Question Decision (`src/confidence/policy.py`)
+### 6. Question Decision (`src/confidence/policy.py`)
 Decides whether to keep asking clarifying questions.
 
 **Stop asking when:**
@@ -238,7 +259,7 @@ def always_ask(ledger: SessionLedger) -> ConfidencePayload:
 
 **Why "other"?** The evaluator treats `"other"` as a wildcard that reveals ANY undisclosed constraint (up to 2 per turn). This gets more information than asking for specific attributes.
 
-### 6. Exposure Gate (`src/confidence/policy`)
+### 7. Exposure Gate (`src/confidence/policy`)
 Controls how many recommendations to show.
 
 | Condition | Reveal |
@@ -262,12 +283,17 @@ Turn 1: "I'm looking for Women Dresses. A key requirement is: cotton."
 2. CONSTRAINT MEMORY:
    verbatim_constraints: ['cotton']
 
-3. BUCKET INDEX:
+3. BUCKET INDEX (Retrieval):
    resolve("Women Dresses") -> pool of 245 products
 
-4. CONSTRAINT INDEX:
-   rank(pool, ['cotton']) -> products with 'cotton' in features score higher
-   -> return top 10 ranked by match + popularity
+4. RERANKER:
+   rank_bucket("Women Dresses", ['cotton'])
+   -> ConstraintIndex scores each product:
+      - exact match "cotton" in attributes: +3.0
+      - substring "cotton" in text: +1.0
+      - token "cotton" in text: +0.5
+   -> sort by score desc, then popularity desc
+   -> return top 10
 
 5. QUESTION DECISION:
    user_exhausted = False, turn = 1
@@ -318,9 +344,11 @@ src/
 │   └── ledger.py               # LedgerService (session state)
 ├── retrieval/
 │   ├── buckets.py              # BucketIndex (category -> product pool)
-│   └── constraint_index.py     # ConstraintIndex (verbatim scoring)
+│   └── constraint_index.py     # ConstraintIndex (scoring engine)
 ├── reranker/
-│   └── rank.py                 # Reranker.rank_bucket()
+│   ├── rank.py                 # Reranker orchestrator (rank_bucket, score_by_constraints)
+│   ├── coverage.py             # Coverage scoring (legacy mode)
+│   └── types.py                # RankResult dataclass
 ├── confidence/
 │   ├── policy.py               # Question decision, exposure gate
 │   ├── session_ledger.py       # SessionLedger (exhausted flag)

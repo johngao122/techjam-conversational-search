@@ -20,8 +20,12 @@ flowchart TD
 
     subgraph RETRIEVAL["RETRIEVAL"]
         BI[BucketIndex: category -> ~180 products]
-        CI[ConstraintIndex: rank by match + popularity]
-        BI --> CI
+    end
+
+    subgraph RERANKER["RERANKER"]
+        CI[ConstraintIndex: 3-tier scoring]
+        CI2[Sort: score desc, popularity desc]
+        CI --> CI2
     end
 
     subgraph QUESTION["QUESTION DECISION"]
@@ -45,7 +49,8 @@ flowchart TD
     LS --> SL
     SL --> CM
     CM --> BI
-    CI --> QD
+    BI --> CI
+    CI2 --> QD
     ASK --> EG
     STOP --> EG
     EG --> OF
