@@ -32,6 +32,7 @@ from src.reranker import build_reranker, default_query
 from src.reranker.rank import retrieval_mode
 from src.retrieval.hybrid import HybridRetriever
 from src.retrieval.retrieval import Retriever
+from src.retrieval.strategies import prepare_constraints
 
 
 @dataclass
@@ -237,6 +238,9 @@ class Agent:
         query = default_query(constraints, user_message)
 
         # -- 5b. Parallel retrieval sources -----------------------------------
+        # Routing:
+        #   "buying"   -> keyword (BM25) + category only
+        #   "browsing" -> keyword (BM25) + category + vector, fused via RRF
         llm_search_key = session.get("llm_search_key") or {}
         vector_query = llm_search_key.get("_string")
         pref_tags = session.get("user_preference", {}).get("preference_tags", [])
@@ -245,8 +249,11 @@ class Agent:
         print(f"[DEBUG] search_key: {search_key}")
         bm25_results = self._retriever.retrieve_bm25(search_key, top_k=top_k, preference_tags=pref_tags)
         print(f"[DEBUG] bm25_results: {bm25_results}")
-        vector_results = self._retriever.retrieve_vector(vector_query, top_k=top_k)
-        # vector_results = []
+        if scenario == "browsing" and self._retriever.has_vectors:
+            vector_results = self._retriever.retrieve_vector(vector_query, top_k=top_k)
+        else:
+            vector_results = []
+        print(f"[DEBUG] intent={scenario} vector_results={len(vector_results)}")
 
         # -- 6. Retrieval + Rerank + Decision (never raises) ------------------
         if self._mode == "legacy":
@@ -272,7 +279,22 @@ class Agent:
                 max_coverage=1,
                 top_tier_crowd=1,
             )
+        elif scenario == "browsing" and vector_results:
+            # Browsing: merge BM25 + vector into a deduplicated pool, then
+            # let score_by_constraints own the ordering entirely.
+            seen: set[str] = set()
+            fused: list[str] = []
+            for asin in bm25_results + vector_results:
+                if asin not in seen:
+                    seen.add(asin)
+                    fused.append(asin)
+            prepared = prepare_constraints(memory.constraints)
+            rank_fn = lambda: self._reranker.score_by_constraints(
+                fused, prepared, pool_size=len(fused),
+                preference_tags=pref_tags, rating_style=rating_style,
+            )
         else:
+            # Buying: bucket pipeline retrieves + scores as normal.
             verbatim = memory.constraints
             transcript = ""
             rank_fn = lambda: self._reranker.rank_bucket(
