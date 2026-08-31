@@ -147,11 +147,13 @@ class Reranker:
         bm25: Bm25Strategy | None = None,
         bucket_pipeline: BucketPipeline | None = None,
         constraint: ConstraintStrategy | None = None,
+        constraint_index: ConstraintIndex | None = None,
     ) -> None:
         self.catalog = catalog
         self._bm25 = bm25
         self._bucket_pipeline = bucket_pipeline
         self._constraint = constraint
+        self.constraint_index = constraint_index
         # Process-lifetime, content-addressed product cache: the catalog is
         # read-only for the duration of a run, so a cache hit is always exactly
         # the value the uncached path would have computed.
@@ -395,4 +397,4 @@ def build_reranker(catalog_path: str) -> Reranker:
     bucket = BucketStrategy(bucket_index, constraint_index)
     bucket_pipeline = BucketPipeline(bucket, constraint, bm25)
 
-    return Reranker(catalog, bm25=bm25, bucket_pipeline=bucket_pipeline, constraint=constraint)
+    return Reranker(catalog, bm25=bm25, bucket_pipeline=bucket_pipeline, constraint=constraint, constraint_index=constraint_index)
