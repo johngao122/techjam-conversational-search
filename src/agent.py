@@ -30,6 +30,7 @@ from src.ledger.ollama_summarizer import OllamaSummarizer
 from src.output import FollowUpContext, OutputFormatter
 from src.reranker import build_reranker, default_query
 from src.reranker.rank import retrieval_mode
+from src.retrieval.hybrid import HybridRetriever
 from src.retrieval.retrieval import Retriever
 
 
@@ -42,10 +43,10 @@ class PriceConstraint:
 _PRICE_RE = re.compile(
     r"(?:"
     r"(?P<op1>under|less\s+than|below|cheaper\s+than|max|maximum|no\s+more\s+than|at\s+most)\s*\$?(?P<amt1>[\d,]+(?:\.\d+)?)"
-    r"|(?P<op2>over|more\s+than|above|at\s+least|minimum|min)\s*\$?(?P<amt2>[\d,]+(?:\.\d+)?)"
-    r"|(?P<op3>around|about|approximately|budget\s+(?:is|of)?|~)\s*\$?(?P<amt3>[\d,]+(?:\.\d+)?)"
-    r"|\$?(?P<amt4>[\d,]+(?:\.\d+)?)\s*(?P<op4>or\s+less|or\s+under|and\s+under|and\s+below|-)"
-    r"|\$(?P<amt5>[\d,]+(?:\.\d+)?)"
+    r'|(?P<op2>over|more\s+than|above|at\s+least|minimum|min)\s*\$?(?P<amt2>[\d,]+(?:\.\d+)?)'
+    r'|(?P<op3>around|about|approximately|budget\s+(?:is|of)?|~)\s*\$?(?P<amt3>[\d,]+(?:\.\d+)?)'
+    r'|\$?(?P<amt4>[\d,]+(?:\.\d+)?)\s*(?P<op4>or\s+less|or\s+under|and\s+under|and\s+below|-)'
+    r'|\$(?P<amt5>[\d,]+(?:\.\d+)?)'
     r")",
     re.IGNORECASE,
 )
@@ -103,6 +104,10 @@ class Agent:
         # independent parallel sources; retrieve_vector degrades to [] when the
         # embedding cache / endpoint / numpy are unavailable.
         self._retriever = Retriever.with_vectors(self._reranker.catalog)
+        self._hybrid_retriever = HybridRetriever(
+            self._retriever,
+            constraint_index=self._reranker.constraint_index,
+        )
         self._popularity = popularity_top10(self._catalog_path)
         warm_parser(self._catalog_path)
         self._mode = retrieval_mode()
@@ -191,11 +196,6 @@ class Agent:
 
         # -- 3b. Update conversation summary ---------------------------------
         session = self._ledger.read(session_id)
-        # current_summary = self._ledger.read(session_id).get("conversation_summary", "")
-        # summary = self._summarizer.summarize(
-        #     last_user_message=user_message,
-        #     previous_summary=current_summary or "",
-        # )
         summary = ""
         self._ledger.set_conversation_summary(session_id, summary)
         # Store in cross-session cache keyed by user_id.
@@ -212,11 +212,6 @@ class Agent:
         conf_ledger.observe(user_message, turn)
         session = self._ledger.read_ref(session_id)
         constraints = self._collect_constraints(session)
-        # `category` is a search-scoping signal pulled from the (possibly
-        # vague) opening line, not a disclosed answer to a clarifying
-        # question -- it must not by itself satisfy the confidence gate's
-        # zero-info forced-clarify check. Retrieval/coverage still use the
-        # unfiltered `constraints` list below.
         disclosed_constraints = self._collect_constraints(session, exclude_attrs={"category"})
         added_new = False
         for value in disclosed_constraints:
@@ -226,9 +221,6 @@ class Agent:
             conf_ledger.reset_progress()
 
         # -- 5. Build search key + query --------------------------------------
-        # Union-join this turn's parser-derived key with the previous turn's so
-        # the key is monotonic across turns: text attributes accumulate (union),
-        # numeric range filters (price/rating) are updated to the latest value.
         session = self._ledger.read(session_id)
         current_key = build_search_key(session)
         previous_key = session.get("search_key") or {}
@@ -239,22 +231,38 @@ class Agent:
         # -- 5b. Parallel retrieval sources -----------------------------------
         llm_search_key = session.get("llm_search_key") or {}
         vector_query = llm_search_key.get("_string")
-        # BM25 uses SQLite which is not thread-safe across threads, so run sequentially.
         print(f"[DEBUG] search_key: {search_key}")
         bm25_results = self._retriever.retrieve_bm25(search_key, top_k=top_k)
         print(f"[DEBUG] bm25_results: {bm25_results}")
         vector_results = self._retriever.retrieve_vector(vector_query, top_k=top_k)
-        # vector_results = []
 
         # -- 6. Retrieval + Rerank + Decision (never raises) ------------------
         pref_tags = session.get("user_preference", {}).get("preference_tags", [])
         rating_style = session.get("user_preference", {}).get("rating_style")
         if self._mode == "legacy":
             rank_fn = lambda: self._reranker.rank(query, constraints, top_k=top_k, preference_tags=pref_tags, rating_style=rating_style)
+        elif self._mode == "hybrid":
+            from src.reranker.types import RankResult
+            _constraint_query = HybridRetriever.build_constraint_query(session, opening_message=opening)
+            from src.retrieval.constraint_index import prepare
+            verbatim_constraints = memory.constraints
+            # Apply constraint normalization just-in-time
+            normalized_constraints = [prepare(c)[0] for c in verbatim_constraints]
+
+            _hybrid_pool = self._hybrid_retriever.retrieve(
+                search_key=search_key,
+                vector_query=_constraint_query,
+                constraints=normalized_constraints, # Pass the normalized version
+                top_k=top_k,
+                opening_message=opening,
+            )
+            rank_fn = lambda: RankResult(
+                ranked=_hybrid_pool,
+                pool_size=len(_hybrid_pool),
+                max_coverage=1,
+                top_tier_crowd=1,
+            )
         else:
-            # Bucket mode ranks against the verbatim constraint memory, not the
-            # taxonomy-routed strings -- the disclosed strings are literal
-            # slices of the target's metadata and match exactly within a bucket.
             verbatim = memory.constraints
             transcript = " ".join(
                 str(h.get("content", ""))
@@ -273,37 +281,15 @@ class Agent:
             policy=self._ask_policy,
             known_attrs=known_attrs,
         )
-        # Fuse bucket (category-scoped), BM25, and vector results via RRF.
-        # recommendations = bm25_results
-        # recommendations = vector_results
-        # recommendations = self._rrf([recommendations, bm25_results, vector_results])
         if payload.ask_attribute:
             conf_ledger.note_ask(payload.ask_attribute)
 
-        # Message-phrasing: every attribute not yet disclosed, bundled into
-        # one question (see missing_topics's docstring). Independent of
-        # payload.ask_attribute (the contract field, which stays "other"
-        # under always_ask). Recomputed fresh from known_attrs each turn --
-        # no per-session state, so a missing attribute keeps being asked
-        # about until it's actually known.
-        #
-        # known_attrs_for_missing (not known_attrs itself, to leave
-        # safe_decide/decide_specific_attribute's already-measured behaviour
-        # untouched): also counts budget as known when price_constraint is
-        # set. A dollar-sign-less disclosure ("under 50") bypasses extract_
-        # attributes()'s own budget regex (which requires a literal "$"),
-        # but _parse_price_constraint already understands it and the search
-        # layer already uses it -- the follow-up question shouldn't keep
-        # asking about something already effectively provided.
         known_attrs_for_missing = set(known_attrs)
         if session.get("price_constraint"):
             known_attrs_for_missing.add("budget")
         missing = missing_topics(known_attrs_for_missing) if payload.clarify else []
 
         # -- 7. Exposure gate + format ----------------------------------------
-        # Reveal one candidate on turns 1-2, the full list from turn 3 (or once
-        # the card is drained / on the final turn). Legacy mode keeps the old
-        # unconditional full-list behaviour.
         if self._mode == "legacy":
             reveal = top_k
         else:
@@ -324,29 +310,7 @@ class Agent:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _rrf(lists: list[list[str]], k: int = 60) -> list[str]:
-        """Reciprocal Rank Fusion: merge ranked lists by summing 1/(rank+k)."""
-        scores: dict[str, float] = {}
-        for ranked_list in lists:
-            for rank, asin in enumerate(ranked_list):
-                scores[asin] = scores.get(asin, 0.0) + 1.0 / (rank + k)
-        return sorted(scores, key=scores.__getitem__, reverse=True)
-
-    @staticmethod
     def _union_search_key(previous: dict[str, list], current: dict[str, list]) -> dict[str, list]:
-        """Merge the previous turn's search key with the current one.
-
-        Text fields (list-of-strings) are *unioned* -- values accumulate across
-        turns, de-duplicated, preserving first-seen order. Numeric range filters
-        (``price``/``rating`` etc., list-of-``{op: value}``) are *updated*: the
-        current turn's value replaces the previous one (latest budget wins),
-        rather than unioning bounds which could impose contradictory limits.
-
-        The result is monotonic for text (never loses a previously-known value)
-        while staying correct for numeric constraints.
-        """
-        # Local import: reuse the retriever's numeric-shape classifier so this
-        # stays in lock-step with how retrieve_bm25 interprets the key.
         from src.retrieval.retrieval import _is_numeric_filter
 
         merged: dict[str, list] = {}
@@ -356,12 +320,10 @@ class Agent:
             cur_val = current.get(field)
             prev_val = previous.get(field)
 
-            # Numeric range filter -> update to current if present, else keep prev.
             if _is_numeric_filter(cur_val) or _is_numeric_filter(prev_val):
                 merged[field] = cur_val if cur_val is not None else prev_val
                 continue
 
-            # Text field -> union of value lists, de-duplicated, order-preserving.
             values: list = []
             for source in (prev_val, cur_val):
                 if isinstance(source, list):
@@ -373,7 +335,6 @@ class Agent:
 
     @staticmethod
     def _collect_constraints(session: dict, exclude_attrs: set[str] | None = None) -> list[str]:
-        """Flatten ledger constraints (+ budget) into coverage constraint strings."""
         exclude_attrs = exclude_attrs or set()
         constraints: list[str] = []
         for attr, values in session.get("constraints", {}).items():
@@ -391,21 +352,14 @@ class Agent:
 
     @staticmethod
     def _build_summary_search_key(summary: str) -> dict:
-        # Use summary directly as the vector query — it already captures semantic
-        # intent, so a second LLM call to shorten it is redundant.
-        # search_key_string = Agent._extract_search_key_with_llm(summary)
         return {"_string": summary}
 
     @staticmethod
     def _extract_search_key_with_llm(summary_text: str) -> str:
-        """Use LLM to extract a simple search string from the summary.
-
-        Returns something like "blue umbrella" or "red leather boots".
-        """
         try:
             import ollama
 
-            prompt = f"""Extract a simple search string from this customer summary.
+            prompt = f'''Extract a simple search string from this customer summary.
 
 Summary: {summary_text}
 
@@ -415,7 +369,7 @@ Return ONLY a simple search string with attributes and product, like:
 - "leather shoes"
 - "black iphone"
 
-Do NOT include extra words or explanations. Just the search string:"""
+Do NOT include extra words or explanations. Just the search string:'''
 
             response = ollama.generate(
                 model="phi3:mini",
@@ -426,14 +380,12 @@ Do NOT include extra words or explanations. Just the search string:"""
 
             search_string = (response.get("response", "") or "").strip()
 
-            # Clean up - remove quotes and extra punctuation
-            search_string = search_string.strip("\"'.")
+            search_string = search_string.strip('"\'._')
 
             if search_string:
                 return search_string
             else:
-                return summary_text  # Fallback to summary if extraction fails
+                return summary_text
 
         except Exception as e:
-            # Fallback: just return the summary text
             return summary_text
