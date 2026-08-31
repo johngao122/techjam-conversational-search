@@ -1,0 +1,48 @@
+flowchart TB
+    subgraph CLIENT["Client"]
+        U[User Message]
+        R[Response]
+    end
+
+    subgraph AGENT["Agent"]
+        AG[Orchestrator]
+    end
+
+    subgraph INTENT["Intent Router"]
+        MP[MessageParser]
+        CM[ConstraintMemory]
+    end
+
+    subgraph STATE["State"]
+        LS[LedgerService]
+        SL[SessionLedger]
+    end
+
+    subgraph RETRIEVAL["Retrieval"]
+        BI[BucketIndex]
+        CI[ConstraintIndex]
+    end
+
+    subgraph QUESTION["Question Decision"]
+        QD{"No more prefs<br/>OR turn >= 10?"}
+        QD -->|No| ASK[Keep asking]
+        QD -->|Yes| STOP[Stop]
+    end
+
+    subgraph OUTPUT["Output"]
+        EG[Exposure Gate]
+        OF[OutputFormatter]
+    end
+
+    U --> AG
+    AG --> MP
+    MP --> CM
+    AG --> LS
+    LS --> SL
+    CM --> BI
+    BI --> CI
+    CI --> QD
+    ASK --> EG
+    STOP --> EG
+    EG --> OF
+    OF --> R
