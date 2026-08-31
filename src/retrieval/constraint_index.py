@@ -122,7 +122,10 @@ def prepare(constraint: str) -> tuple[str, tuple[str, ...]]:
 
 
 class ConstraintIndex:
-    """Per-product attribute sets and text, plus the popularity prior."""
+    """Per-product attribute sets and text, plus the popularity prior.
+
+    Includes an inverted index for O(1) lookup of products matching a constraint.
+    """
 
     def __init__(self, rows) -> None:
         self.attributes: dict[str, set[str]] = {}
@@ -130,6 +133,11 @@ class ConstraintIndex:
         self.popularity: dict[str, float] = {}
         self.average_rating: dict[str, float] = {}
         self._document_frequency: dict[str, int] = {}
+        # Inverted index: attribute -> set of ASINs that have this attribute
+        # Enables O(1) lookup instead of O(n) scan for constraint matching
+        self._inverted: dict[str, set[str]] = {}
+        # Token inverted index: token -> set of ASINs whose text contains this token
+        self._token_inverted: dict[str, set[str]] = {}
         # Only ``_exact_weight`` reads this, and only under IDF_WEIGHT=1.
         # Building it unconditionally is a 50k-product tally nobody looks at.
         use_idf = os.environ.get("IDF_WEIGHT", "") == "1"
@@ -137,9 +145,21 @@ class ConstraintIndex:
             asin = str(product["parent_asin"])
             attributes = flatten_attributes(product)
             self.attributes[asin] = attributes
-            self.text[asin] = searchable_text(product)
+            text = searchable_text(product)
+            self.text[asin] = text
             self.popularity[asin] = math.log1p(float(product.get("rating_number") or 0))
             self.average_rating[asin] = float(product.get("average_rating") or 0)
+            # Build inverted index for exact attribute matches
+            for attr in attributes:
+                if attr not in self._inverted:
+                    self._inverted[attr] = set()
+                self._inverted[attr].add(asin)
+            # Build token inverted index for token containment
+            for token in _TOKEN_RE.findall(text):
+                if len(token) > 2:
+                    if token not in self._token_inverted:
+                        self._token_inverted[token] = set()
+                    self._token_inverted[token].add(asin)
             if use_idf:
                 for attribute in attributes:
                     self._document_frequency[attribute] = self._document_frequency.get(attribute, 0) + 1
@@ -151,6 +171,53 @@ class ConstraintIndex:
             return EXACT_WEIGHT
         df = self._document_frequency.get(constraint, 0)
         return math.log(self._total / max(1, df))
+
+    def fast_candidates(
+        self, constraints: list[tuple[str, tuple[str, ...], float]],
+        exact_only: bool = False,
+    ) -> dict[str, float]:
+        """Constraint candidate retrieval using inverted index where possible.
+
+        Returns {asin: score} for all products matching at least one constraint.
+        Uses inverted index for exact matches (O(1)), falls back to scan for
+        substring/token matches.
+
+        Matches the same tiered logic as score():
+        - Tier 1: Exact attribute match (weight 3.0) - uses inverted index
+        - Tier 2: Substring match (weight 1.0) - only if no exact match
+        - Tier 3: Token containment (weight 0.5) - only if no exact/substring match
+
+        If ``exact_only=True``, skips the O(n) substring/token scan and returns
+        only exact attribute matches. This is much faster for selective constraints.
+        """
+        scores: dict[str, float] = {}
+
+        for normalised, tokens, weight in constraints:
+            if weight <= 0.0 or not normalised:
+                continue
+
+            exact_matched: set[str] = set()
+
+            # Tier 1: Exact attribute match via inverted index (O(1) lookup)
+            exact_matches = self._inverted.get(normalised, set())
+            for asin in exact_matches:
+                scores[asin] = scores.get(asin, 0.0) + weight * self._exact_weight(normalised)
+                exact_matched.add(asin)
+
+            if exact_only:
+                continue
+
+            # Tier 2 & 3: Substring and token matching (O(n) scan for non-exact matches)
+            # This is the fallback for products that don't have an exact attribute match
+            for asin, text in self.text.items():
+                if asin in exact_matched:
+                    continue
+                if normalised in text:
+                    scores[asin] = scores.get(asin, 0.0) + weight * SUBSTRING_WEIGHT
+                elif tokens and all(token in text for token in tokens):
+                    scores[asin] = scores.get(asin, 0.0) + weight * TOKEN_WEIGHT
+
+        return scores
 
     def score(self, asin: str, constraints: list[tuple[str, tuple[str, ...], float]]) -> float:
         """Weighted match score for one product.
