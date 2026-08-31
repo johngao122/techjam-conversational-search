@@ -95,6 +95,59 @@ class BucketResolveTest(unittest.TestCase):
         self.assertEqual(how, "unresolved")
 
 
+# Reproduces the real catalog shape that exposed the containment tie-break
+# bug: a pure "Jackets" leaf category (short bucket key) vs. a combined
+# "Coats, Jackets & Vests" -> "Vests" leaf category, whose coarse_category
+# ("jackets & vests vests") is a much longer string that happens to contain
+# the word "jackets" as a raw substring.
+JACKET_VEST_ROWS = [
+    {
+        "parent_asin": "JACKET0001",
+        "title": "Men's Cycling Jacket",
+        "features": ["windproof"],
+        "details": {"department": "mens"},
+        "description": ["a warm cycling jacket"],
+        "categories": ["Clothing, Shoes & Jewelry", "Cycling", "Men", "Jackets"],
+        "store": "OuterCo",
+        "average_rating": 4.3,
+        "rating_number": 150,
+        "price": 90.0,
+    },
+    {
+        "parent_asin": "VEST0001",
+        "title": "Women's Puffer Vest",
+        "features": ["sleeveless"],
+        "details": {"department": "womens"},
+        "description": ["a puffer vest"],
+        "categories": [
+            "Clothing, Shoes & Jewelry", "Women", "Clothing",
+            "Coats, Jackets & Vests", "Vests",
+        ],
+        "store": "VestCo",
+        "average_rating": 4.1,
+        "rating_number": 900,
+        "price": 55.0,
+    },
+]
+
+
+class BucketContainmentTieBreakTest(unittest.TestCase):
+    """Regression: a short fragment like "jackets" must resolve to the
+    category-pure bucket, not a longer combined-category bucket that merely
+    contains the word as a substring (e.g. a vest bucket whose coarse
+    category is "Coats, Jackets & Vests" -> "jackets & vests vests")."""
+
+    def setUp(self) -> None:
+        self.index = BucketIndex(JACKET_VEST_ROWS)
+
+    def test_short_fragment_resolves_to_pure_bucket_not_longest_containing_key(self) -> None:
+        key, how = self.index.resolve("I'm looking for jackets, but I'm still exploring.")
+        self.assertEqual(how, "containment-reverse")
+        pool = self.index.get(key)
+        self.assertIn("JACKET0001", pool)
+        self.assertNotIn("VEST0001", pool)
+
+
 class FragmentTypeTokensTest(unittest.TestCase):
     def test_extracts_singularized_type_words(self) -> None:
         tokens = fragment_type_tokens("i want a blue satin dress")

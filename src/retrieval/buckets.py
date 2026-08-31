@@ -192,15 +192,32 @@ class BucketIndex:
         if lowered in self._buckets:
             return lowered, "exact"
 
-        # Containment: the fragment survived a reworded wrapper, or the
-        # organizer trimmed/extended the path. Longest wins -- a longer key
-        # shares more of the path and so is the more specific bucket.
-        contained = [
-            key for key in self._buckets
-            if key and (key in lowered or lowered in key)
-        ]
-        if contained:
-            return max(contained, key=len), "containment"
+        # Containment has two distinct directions with opposite tie-breaks --
+        # collapsing them into one `key in lowered or lowered in key` list and
+        # always taking the longest match was a real bug: a short customer
+        # fragment like "jackets" is a raw substring of many unrelated, long
+        # combined-category bucket keys (e.g. "jackets & vests quilted
+        # lightweight jackets", a vest-heavy bucket), and `max(..., key=len)`
+        # would pick that coincidentally-long key over the short, exact,
+        # category-pure "men jackets" bucket -- recommending vests for a
+        # jacket request.
+        #
+        #   key_in_fragment: the fragment survived a reworded wrapper, or the
+        #     organizer trimmed/extended the path (fragment is the LONGER
+        #     side, e.g. "a blue men jackets today"). Longest key wins here --
+        #     it shares more of the path and so is the more specific bucket.
+        #   fragment_in_key: the customer said less than the full templated
+        #     category (fragment is the SHORTER side, e.g. just "jackets").
+        #     Shortest key wins here -- the closest, least-diluted specific
+        #     category, not whichever combined-category name happens to be
+        #     longest and merely contains the word somewhere.
+        key_in_fragment = [key for key in self._buckets if key and key in lowered]
+        if key_in_fragment:
+            return max(key_in_fragment, key=len), "containment"
+
+        fragment_in_key = [key for key in self._buckets if key and lowered in key]
+        if fragment_in_key:
+            return min(fragment_in_key, key=len), "containment-reverse"
 
         # Token overlap: word order changed or a connector was dropped.
         # Singularized on both sides -- catalog category taxonomy is plural

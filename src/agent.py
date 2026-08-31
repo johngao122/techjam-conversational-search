@@ -261,8 +261,9 @@ class Agent:
             print(f"[DEBUG] intent={scenario} vector_results={len(vector_results)}")
 
         # -- 6. Retrieval + Rerank + Decision (never raises) ------------------
+        category_constraints = search_key.get("category", [])
         if self._mode == "legacy":
-            rank_fn = lambda: self._reranker.rank(query, constraints, top_k=top_k, preference_tags=pref_tags, rating_style=rating_style)
+            rank_fn = lambda: self._reranker.rank(query, constraints, top_k=top_k, preference_tags=pref_tags, rating_style=rating_style, category_constraints=category_constraints)
         elif self._mode == "hybrid":
             from src.reranker.types import RankResult
             _constraint_query = HybridRetriever.build_constraint_query(session, opening_message=opening) if scenario != "intent_override" else ""
@@ -297,13 +298,15 @@ class Agent:
             rank_fn = lambda: self._reranker.score_by_constraints(
                 fused, prepared, pool_size=len(fused),
                 preference_tags=pref_tags, rating_style=rating_style,
+                category_constraints=category_constraints,
             )
         else:
             # Buying: bucket pipeline retrieves + scores as normal.
             verbatim = memory.constraints
             transcript = ""
             rank_fn = lambda: self._reranker.rank_bucket(
-                opening, verbatim, top_k=top_k, transcript=transcript, preference_tags=pref_tags, rating_style=rating_style
+                opening, verbatim, top_k=top_k, transcript=transcript, preference_tags=pref_tags, rating_style=rating_style,
+                category_constraints=category_constraints,
             )
         known_attrs = set(session.get("constraints", {}).keys())
         payload, recommendations = safe_decide(

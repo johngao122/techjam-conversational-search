@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import os
 from collections import OrderedDict
+from functools import lru_cache
 
 from src.catalog.catalog import Catalog
 from src.catalog.loader import load_catalog_rows
+from src.message_parser.catalog_vocab import _normalize
 from src.reranker.coverage import Product, compile_constraints
 from src.retrieval.base import RetrievalRequest
 from src.retrieval.buckets import BucketIndex, head_noun_token
@@ -46,6 +48,38 @@ def retrieval_mode() -> str:
     original BM25 pipeline byte-identically (the A/B control and the last
     fallback rung)."""
     return os.environ.get("RETRIEVAL_MODE", "bucket").strip().lower() or "bucket"
+
+
+# Additive rerank bonus for a product whose structured `categories` field
+# contains a disclosed category term. 0.0 reproduces current behavior
+# byte-for-byte -- see scripts/ab_eval.py + scripts/paraphrase_stress.py runs
+# in runs/log.jsonl before changing this value; two similarly-plausible
+# reranking boosts in this repo's history looked good and measurably
+# regressed the score when actually tested (see project memory).
+CATEGORY_MATCH_BONUS = 0.5
+
+
+def _category_terms(category_constraints: list[str] | None) -> frozenset[str]:
+    """Normalize disclosed category constraint value(s) into individual
+    lowercase leaf terms -- same normalization + comma-split-per-element
+    handling as ``src.message_parser.catalog_vocab.load_catalog_vocab``."""
+    terms: set[str] = set()
+    for raw in (category_constraints or []):
+        for part in str(raw).split(","):
+            cleaned = _normalize(part)
+            if cleaned:
+                terms.add(cleaned)
+    return frozenset(terms)
+
+
+def _category_bonus(product: Product, category_terms: frozenset[str]) -> float:
+    """Soft nudge, never a filter: CATEGORY_MATCH_BONUS if any disclosed
+    category term appears verbatim in the product's structured categories,
+    else 0."""
+    if not CATEGORY_MATCH_BONUS or not category_terms or not product.categories:
+        return 0.0
+    return CATEGORY_MATCH_BONUS if category_terms & product.categories else 0.0
+
 
 _ROW_COLUMNS = (
     "parent_asin",
@@ -91,7 +125,7 @@ def _hydrate_products(
             f"WHERE parent_asin IN ({placeholders})"
         )
         rows = catalog.execute(sql, missing)
-        fetched = _rows_to_products(rows)
+        fetched = _rows_to_products(rows, _category_terms_by_asin(str(catalog.catalog_path)))
         if cache is not None:
             cache.update(fetched)
     else:
@@ -101,7 +135,37 @@ def _hydrate_products(
     return {pid: cache[pid] for pid in parent_asins if pid in cache}
 
 
-def _rows_to_products(rows: list[tuple]) -> dict[str, Product]:
+@lru_cache(maxsize=4)
+def _category_terms_by_asin(catalog_path: str) -> dict[str, frozenset[str]]:
+    """Normalized leaf category terms per product, keyed by parent_asin.
+
+    Built from the raw catalog rows (``load_catalog_rows``, already cached),
+    NOT from the FTS ``categories`` column: that column is pre-flattened into
+    one space-joined string per product (see ``Catalog._build_index`` /
+    ``_text``), which loses the boundary between separate `categories` list
+    elements -- e.g. ["Clothing, Shoes & Jewelry", "Men", "Watches"] becomes
+    "Clothing, Shoes & Jewelry Men Watches", and splitting that string on ","
+    would merge "Men" and "Watches" into one ungrabbable blob. Re-deriving
+    from the raw list (same comma-split-per-element + normalize as
+    ``src.message_parser.catalog_vocab.load_catalog_vocab``) is the only way
+    to recover individual leaf terms."""
+    result: dict[str, frozenset[str]] = {}
+    for row in load_catalog_rows(catalog_path):
+        terms: set[str] = set()
+        for raw in row.get("categories") or []:
+            for part in str(raw).split(","):
+                cleaned = _normalize(part)
+                if cleaned:
+                    terms.add(cleaned)
+        result[str(row["parent_asin"])] = frozenset(terms)
+    return result
+
+
+def _rows_to_products(
+    rows: list[tuple],
+    category_terms_by_asin: dict[str, frozenset[str]] | None = None,
+) -> dict[str, Product]:
+    category_terms_by_asin = category_terms_by_asin or {}
     products: dict[str, Product] = {}
     for row in rows:
         (
@@ -127,6 +191,7 @@ def _rows_to_products(rows: list[tuple]) -> dict[str, Product]:
             price=float(price) if price is not None else None,
             rating_number=int(rating_number) if rating_number is not None else 0,
             average_rating=float(average_rating) if average_rating is not None else 0.0,
+            categories=category_terms_by_asin.get(str(parent_asin), frozenset()),
         )
     return products
 
@@ -178,6 +243,7 @@ class Reranker:
         transcript: str = "",
         preference_tags: list[str] | None = None,
         rating_style: str | None = None,
+        category_constraints: list[str] | None = None,
     ) -> RankResult:
         """Bucket-mode retrieval + verbatim-constraint scoring.
 
@@ -204,6 +270,7 @@ class Reranker:
             pool_size=self._bucket_pipeline.last_pool_size,
             preference_tags=preference_tags,
             rating_style=rating_style,
+            category_constraints=category_constraints,
         )
 
     def rank(
@@ -214,6 +281,7 @@ class Reranker:
         pool_size: int = DEFAULT_POOL,
         preference_tags: list[str] | None = None,
         rating_style: str | None = None,
+        category_constraints: list[str] | None = None,
     ) -> RankResult:
         """Legacy BM25 retrieval + coverage scoring."""
         constraints = constraints or []
@@ -235,6 +303,7 @@ class Reranker:
             top_k=top_k,
             preference_tags=preference_tags,
             rating_style=rating_style,
+            category_constraints=category_constraints,
         )
 
     # ------------------------------------------------------------------
@@ -250,6 +319,7 @@ class Reranker:
         top_k: int = 10,
         preference_tags: list[str] | None = None,
         rating_style: str | None = None,
+        category_constraints: list[str] | None = None,
     ) -> RankResult:
         """Coverage scoring: order by (coverage, retrieval rank, rating).
 
@@ -265,6 +335,7 @@ class Reranker:
         # Compile each constraint once, then reuse across all candidates.
         matchers = compile_constraints(constraints)
         pref_matchers = compile_constraints(list(preference_tags or []))
+        category_terms = _category_terms(category_constraints)
 
         # Score each candidate: coverage, retrieval rank (lower=better), rating.
         # Track max coverage and its crowd in the same scan (no second pass).
@@ -277,7 +348,8 @@ class Reranker:
                 continue
             cov = sum(1 for m in matchers if m.matches(product))
             pref_bonus = 0.15 * sum(1 for m in pref_matchers if m.matches(product))
-            score = cov + pref_bonus
+            cat_bonus = _category_bonus(product, category_terms)
+            score = cov + pref_bonus + cat_bonus
             scored.append((score, retrieval_rank, product))
             if cov > max_coverage:
                 max_coverage = cov
@@ -326,6 +398,7 @@ class Reranker:
         pool_size: int,
         preference_tags: list[str] | None = None,
         rating_style: str | None = None,
+        category_constraints: list[str] | None = None,
     ) -> RankResult:
         """Verbatim-constraint coverage over an already-ranked pool.
 
@@ -347,11 +420,18 @@ class Reranker:
                 if self._constraint.score(best, [(norm, toks, w)]) > 0.0
             )
 
-        # Second-pass re-sort using rating_style (always) and preference_tags
+        # Second-pass re-sort using rating_style (always), preference_tags
         # (only when no constraints matched yet — turn 1 pool is unordered by
-        # constraints so pref signals are the only differentiator).
+        # constraints so pref signals are the only differentiator), and the
+        # category bonus (every turn -- unlike preference tags, a disclosed
+        # category constraint keeps nudging score for the whole session, not
+        # just turn 1, since the underlying problem -- wrong-category items
+        # outscoring true matches on plain BM25 text overlap -- persists
+        # regardless of what other constraints have accumulated).
         use_prefs = bool(preference_tags) and not prepared
-        if rating_style or use_prefs:
+        category_terms = _category_terms(category_constraints)
+        use_category = bool(category_terms) and CATEGORY_MATCH_BONUS > 0
+        if rating_style or use_prefs or use_category:
             products = _hydrate_products(self.catalog, ranked, cache=self._product_cache)
             pref_matchers = compile_constraints(list(preference_tags or [])) if use_prefs else []
             style = (rating_style or "").lower()
@@ -369,8 +449,10 @@ class Reranker:
                     scored.append((retrieval_rank, 0.0, pid, 0.0))
                     continue
                 pref_bonus = 0.15 * sum(1 for m in pref_matchers if m.matches(product)) if use_prefs else 0.0
+                cat_bonus = _category_bonus(product, category_terms) if use_category else 0.0
+                total_bonus = pref_bonus + cat_bonus
                 rating_score = w_volume * product.rating_number + w_rating * product.average_rating * 1000
-                scored.append((retrieval_rank, pref_bonus, pid, rating_score))
+                scored.append((retrieval_rank, total_bonus, pid, rating_score))
 
             scored.sort(key=lambda s: (s[0], -s[1], -s[3], s[2]))
             ranked = [s[2] for s in scored]

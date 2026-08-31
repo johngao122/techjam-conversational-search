@@ -34,6 +34,7 @@ class Product:
     price: float | None
     rating_number: int = 0
     average_rating: float = 0.0
+    categories: frozenset[str] = frozenset()  # normalized leaf category terms
 
 # Budget: match a number after a budget cue ($, budget, under, less than, <=),
 # or a number immediately followed by a currency word ("25 dollars").
