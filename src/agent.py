@@ -107,6 +107,7 @@ class Agent:
         self._hybrid_retriever = HybridRetriever(
             self._retriever,
             constraint_index=self._reranker.constraint_index,
+            bucket_index=self._reranker.bucket_index,
         )
         self._popularity = popularity_top10(self._catalog_path)
         warm_parser(self._catalog_path)
