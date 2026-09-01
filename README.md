@@ -102,22 +102,6 @@ and aggregate metrics to a JSON file.
 ```bash
 # Headline score → results.json
 python3 -m evaluator.local_evaluator
-
-# Component ablations — one switch per run, diffed against a baseline run
-python3 scripts/ab_eval.py --label baseline
-RETRIEVAL_MODE=legacy      python3 scripts/ab_eval.py --label legacy      --vs baseline
-EXPOSURE_GATE=0            python3 scripts/ab_eval.py --label no-exposure --vs baseline
-OVERRIDE_POLICY=evict_all  python3 scripts/ab_eval.py --label evict-all   --vs baseline
-
-# Paraphrase robustness — reworded customer replies at two severities
-python3 scripts/paraphrase_stress.py --level mild
-python3 scripts/paraphrase_stress.py --level aggressive
-
-# Latency and memory profile
-python3 -m scripts.benchmark_latency
-
-# Interactive session — type the customer's side yourself
-python3 scripts/try_agent.py
 ```
 
 Expected headline output: `hit_rate_at_10 1.0`, `mrr ≈ 0.968`, `mttc ≈ 2.07`,
@@ -126,6 +110,27 @@ Expected headline output: `hit_rate_at_10 1.0`, `mrr ≈ 0.968`, `mttc ≈ 2.07`
 Environment used for the reported figures: Python 3.11, single CPU core, ~1 GB
 RAM, commit `88daecf`. The pipeline is deterministic, so the score is
 reproducible from a frozen commit.
+
+---
+
+## Interactive session
+
+Run a live conversation against the agent from the terminal:
+
+```bash
+python3 scripts/try_agent.py
+```
+
+Type a shopping request at the `You [turn N]:` prompt. The agent replies with
+clarifying questions and product recommendations just as it would during
+evaluation. Type `quit` or press `Ctrl-C` to exit.
+
+These are additional interactive test harnesses for individual subsystems and are NOT IN USE for the interactive session:
+
+```bash
+src/embeddings/try_it.py        # embedding / semantic-search REPL
+src/message_parser/try_it.py    # constraint-parser REPL
+```
 
 ---
 
