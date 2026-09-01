@@ -101,6 +101,41 @@ case "${1:-eval}" in
         python3 -c "import json; d=json.load(open('results_hybrid.json')); print(f\"score={d.get('recommended_technical_score','?'):.4f}  hit={d.get('hit_rate_at_10','?')}  mrr={d.get('mrr','?')}  mttc={d.get('mttc','?')}\")"
         ;;
     # ========================
+    # TIERED bucket-fusion eval
+    # ========================
+    # Pass a mode as $2: bucket_bm25 | bucket_vector | bucket_bm25_vector
+    # (defaults to bucket_bm25_vector). Vector tiers need the embedding endpoint
+    # env vars set (DOCKER_MODEL_BASE_URL / DOCKER_MODEL_API_KEY /
+    # DOCKER_EMBED_MODEL_NAME) or they silently degrade to no vector boost.
+    tier-eval)
+        MODE="${2:-bucket_bm25_vector}"
+        echo "Running TIERED eval (RETRIEVAL_MODE=$MODE)..."
+        RETRIEVAL_MODE="$MODE" python3 -m evaluator.local_evaluator --output "results_${MODE}.json"
+        python3 -c "import json; d=json.load(open('results_${MODE}.json')); print(f\"score={d.get('recommended_technical_score','?'):.4f}  hit={d.get('hit_rate_at_10','?')}  mrr={d.get('mrr','?')}  mttc={d.get('mttc','?')}\")"
+        ;;
+    tier-ab)
+        # A/B each tier against a bucket baseline, with per-session churn.
+        echo "Recording bucket baseline..."
+        python3 scripts/ab_eval.py --label bucket_baseline --note "bucket default"
+        for MODE in bucket_bm25 bucket_vector bucket_bm25_vector; do
+            echo "A/B $MODE vs bucket_baseline..."
+            RETRIEVAL_MODE="$MODE" python3 scripts/ab_eval.py --label "$MODE" --vs bucket_baseline
+        done
+        ;;
+    tier-stress)
+        MODE="${2:-bucket_bm25_vector}"
+        echo "Running TIERED paraphrase stress (RETRIEVAL_MODE=$MODE)..."
+        RETRIEVAL_MODE="$MODE" python3 scripts/paraphrase_stress.py --level none --output "results_${MODE}_stress_none.json"
+        RETRIEVAL_MODE="$MODE" python3 scripts/paraphrase_stress.py --level mild --output "results_${MODE}_stress_mild.json"
+        RETRIEVAL_MODE="$MODE" python3 scripts/paraphrase_stress.py --level aggressive --output "results_${MODE}_stress_aggressive.json"
+        echo ""
+        echo "=== TIERED ($MODE) stress summary ==="
+        for f in "results_${MODE}_stress_none.json" "results_${MODE}_stress_mild.json" "results_${MODE}_stress_aggressive.json"; do
+            echo -n "$f: "
+            python3 -c "import json; d=json.load(open('$f')); print(f\"score={d.get('recommended_technical_score','?'):.4f}  hit={d.get('hit_rate_at_10','?')}  mrr={d.get('mrr','?')}  mttc={d.get('mttc','?')}\")"
+        done
+        ;;
+    # ========================
     # Fresh (unseen) dataset generation + stress
     # ========================
     # NUM_SAMPLES and SEED are optional env vars, e.g.:
