@@ -106,8 +106,8 @@ Expected headline output: `hit_rate_at_10 1.0`, `mrr ≈ 0.968`, `mttc ≈ 2.07`
 `recommended_technical_score ≈ 0.969`, `reported_token_usage` all zero.
 
 Environment used for the reported figures: Python 3.11, single CPU core, ~1 GB
-RAM, commit `88daecf`. The pipeline is deterministic, so the score is
-reproducible from a frozen commit.
+RAM. The pipeline is deterministic, so the score is
+reproducible from a frozen commit (`54bd227`).
 
 ---
 
