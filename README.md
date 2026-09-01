@@ -39,8 +39,6 @@ never raises and always returns a list.
 
 ## Results
 
-200 public sessions, commit `88daecf`.
-
 | Metric | BM25 baseline | This system |
 |---|---|---|
 | HitRate@10 | 0.790 | **1.000** |
