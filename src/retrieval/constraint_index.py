@@ -11,10 +11,13 @@ Weights are flat rather than IDF-scaled (IDF measured worse: 0.962 vs 0.967).
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 import math
 import os
+import pickle
 import re
+from pathlib import Path
 
 # Match tiers, best to worst. A verbatim hit is worth 3x a loose token match
 # because within a bucket it is very nearly an identity check.
@@ -123,10 +126,22 @@ def prepare(constraint: str) -> tuple[str, tuple[str, ...]]:
     return normalised, tokens
 
 
+_CACHE_DIR = Path(".cache")
+_CONSTRAINT_INDEX_CACHE = _CACHE_DIR / "constraint_index.pkl"
+
+
+def _catalog_hash(rows: tuple) -> str:
+    """Compute a hash of the catalog to detect changes."""
+    # Hash the first and last few ASINs + total count as a quick fingerprint
+    asins = [str(p.get("parent_asin", "")) for p in rows[:10]] + [str(p.get("parent_asin", "")) for p in rows[-10:]]
+    fingerprint = f"{len(rows)}:{':'.join(asins)}"
+    return hashlib.md5(fingerprint.encode()).hexdigest()[:12]
+
+
 class ConstraintIndex:
     """Per-product attribute sets and text, plus the popularity prior."""
 
-    def __init__(self, rows) -> None:
+    def __init__(self, rows, cache: bool = True) -> None:
         self.attributes: dict[str, set[str]] = {}
         self.text: dict[str, str] = {}
         self.popularity: dict[str, float] = {}
@@ -138,11 +153,72 @@ class ConstraintIndex:
         # Token inverted index: token -> set of ASINs whose text contains this token
         self._token_inverted: dict[str, set[str]] = {}
         # Stemmed token inverted index: stem -> set of ASINs
-        # Enables matching "dress" to products with "dresses", "dressed", etc.
+        # Enables matching \"dress\" to products with \"dresses\", \"dressed\", etc.
         self._stem_inverted: dict[str, set[str]] = {}
-        # Only ``_exact_weight`` reads this, and only under IDF_WEIGHT=1.
-        # Building it unconditionally is a 50k-product tally nobody looks at.
-        use_idf = os.environ.get("IDF_WEIGHT", "") == "1"
+        self._use_idf = os.environ.get("IDF_WEIGHT", "") == "1"
+        self._total = 0
+
+        # Try loading from cache
+        if cache and self._load_cache(rows):
+            return
+
+        # Build from scratch
+        self._build_index(rows)
+
+        # Save to cache
+        if cache:
+            self._save_cache(rows)
+
+    def _load_cache(self, rows) -> bool:
+        """Try to load index from cache. Returns True if successful."""
+        if not _CONSTRAINT_INDEX_CACHE.exists():
+            return False
+        try:
+            with open(_CONSTRAINT_INDEX_CACHE, "rb") as f:
+                cached = pickle.load(f)
+            # Verify catalog hash matches
+            if cached.get("catalog_hash") != _catalog_hash(rows):
+                return False
+            if cached.get("use_idf") != self._use_idf:
+                return False
+            self.attributes = cached["attributes"]
+            self.text = cached["text"]
+            self.popularity = cached["popularity"]
+            self.average_rating = cached["average_rating"]
+            self._document_frequency = cached["_document_frequency"]
+            self._inverted = cached["_inverted"]
+            self._token_inverted = cached["_token_inverted"]
+            self._stem_inverted = cached["_stem_inverted"]
+            self._total = cached["_total"]
+            return True
+        except Exception:
+            return False
+
+    def _save_cache(self, rows) -> None:
+        """Save index to cache."""
+        try:
+            _CACHE_DIR.mkdir(exist_ok=True)
+            cached = {
+                "catalog_hash": _catalog_hash(rows),
+                "use_idf": self._use_idf,
+                "attributes": self.attributes,
+                "text": self.text,
+                "popularity": self.popularity,
+                "average_rating": self.average_rating,
+                "_document_frequency": self._document_frequency,
+                "_inverted": self._inverted,
+                "_token_inverted": self._token_inverted,
+                "_stem_inverted": self._stem_inverted,
+                "_total": self._total,
+            }
+            with open(_CONSTRAINT_INDEX_CACHE, "wb") as f:
+                pickle.dump(cached, f)
+        except Exception:
+            pass  # Caching is best-effort
+
+    def _build_index(self, rows) -> None:
+        """Build the index from scratch."""
+        use_idf = self._use_idf
         for product in rows:
             asin = str(product["parent_asin"])
             attributes = flatten_attributes(product)
@@ -171,7 +247,6 @@ class ConstraintIndex:
                 for attribute in attributes:
                     self._document_frequency[attribute] = self._document_frequency.get(attribute, 0) + 1
         self._total = max(1, len(self.attributes))
-        self._use_idf = use_idf
 
     def _exact_weight(self, constraint: str) -> float:
         if not self._use_idf:
