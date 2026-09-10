@@ -8,6 +8,8 @@ On the 200 public evaluation sessions it reaches a **technical score of 0.969**
 (HitRate@10 1.00, MRR 0.968, 2.07 mean turns to conversion), against 0.107 for
 the supplied BM25 starter.
 
+demo : https://youtu.be/TIq5ZgblC8A
+
 ---
 
 ## Project overview
