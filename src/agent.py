@@ -25,6 +25,7 @@ from src.reranker.rank import retrieval_mode
 from src.retrieval.hybrid import HybridRetriever
 from src.retrieval.retrieval import Retriever
 from src.retrieval.strategies import prepare_constraints
+from src.retrieval.tiered import TieredRetriever
 
 _DEBUG = os.environ.get("AGENT_DEBUG", "").strip().lower() in {"1", "true", "yes"}
 
@@ -70,6 +71,40 @@ def _parse_price_constraint(text: str) -> PriceConstraint | None:
     return None
 
 
+def _tier_weights() -> tuple[float, float, int]:
+    """Rank-decayed boost tunables for the ``bucket_*`` fusion modes.
+
+    ``TIER_BM25_WEIGHT`` (alpha) / ``TIER_VECTOR_WEIGHT`` (beta) scale each
+    complementary source's contribution; ``TIER_RRF_K`` (k) sets the rank-decay
+    curve of ``1/(k + rank)``. Defaults reproduce an equal-weight fusion with
+    the conventional RRF constant.
+    """
+    def _f(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name, "").strip() or default)
+        except ValueError:
+            return default
+
+    def _i(name: str, default: int) -> int:
+        try:
+            return int(os.environ.get(name, "").strip() or default)
+        except ValueError:
+            return default
+
+    return (
+        _f("TIER_BM25_WEIGHT", 1.0),
+        _f("TIER_VECTOR_WEIGHT", 1.0),
+        _i("TIER_RRF_K", 60),
+    )
+
+
+_TIER_MODES = {
+    "bucket_bm25": (True, False),
+    "bucket_vector": (False, True),
+    "bucket_bm25_vector": (True, True),
+}
+
+
 def ask_policy() -> str:
     """Ship default is ``always_ask``. ``ASK_POLICY=attribute_cycle`` swaps in
     the specific-attribute-per-turn, never-repeat policy for A/B measurement."""
@@ -100,6 +135,24 @@ class Agent:
             self._retriever,
             constraint_index=self._reranker.constraint_index,
             bucket_index=self._reranker.bucket_index,
+        )
+        # Tiered bucket-fusion retriever: bucket score boosted by BM25/vector
+        # (rank-decayed), confined to the bucket pool. Which sources are active
+        # is decided per-mode below; construction is cheap so it is always
+        # built and simply left unused outside the bucket_* modes.
+        self._tier_bm25_w, self._tier_vector_w, self._tier_rrf_k = _tier_weights()
+        _tier_use_bm25, _tier_use_vector = _TIER_MODES.get(
+            retrieval_mode(), (False, False)
+        )
+        self._tiered_retriever = TieredRetriever(
+            self._retriever,
+            constraint_index=self._reranker.constraint_index,
+            bucket_index=self._reranker.bucket_index,
+            rrf_k=self._tier_rrf_k,
+            bm25_weight=self._tier_bm25_w,
+            vector_weight=self._tier_vector_w,
+            use_bm25=_tier_use_bm25,
+            use_vector=_tier_use_vector,
         )
         self._popularity = popularity_top10(self._catalog_path)
         warm_parser(self._catalog_path)
@@ -268,6 +321,32 @@ class Agent:
             rank_fn = lambda: RankResult(
                 ranked=_hybrid_pool,
                 pool_size=len(_hybrid_pool),
+                max_coverage=1,
+                top_tier_crowd=1,
+            )
+        elif self._mode in _TIER_MODES:
+            # Tiered bucket-fusion: the bucket pool scored by verbatim
+            # constraints, then boosted (rank-decayed) by whichever of BM25 /
+            # vector this mode enables. Overlapping hits shift the ordering but
+            # off-bucket products never surface. Reuses the same vector query the
+            # hybrid path builds so the two paths embed identical intent.
+            from src.reranker.types import RankResult
+
+            _constraint_query = (
+                HybridRetriever.build_constraint_query(session, opening_message=opening)
+                if scenario != "intent_override"
+                else ""
+            )
+            _tier_pool = self._tiered_retriever.retrieve(
+                search_key=search_key,
+                vector_query=_constraint_query,
+                constraints=memory.constraints,
+                top_k=top_k,
+                opening_message=opening,
+            )
+            rank_fn = lambda: RankResult(
+                ranked=_tier_pool,
+                pool_size=len(_tier_pool),
                 max_coverage=1,
                 top_tier_crowd=1,
             )

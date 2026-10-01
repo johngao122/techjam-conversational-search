@@ -352,6 +352,21 @@ class ConstraintIndex:
                 total += weight * TOKEN_WEIGHT
         return total
 
+    def score_pool(
+        self,
+        pool,
+        constraints: list[tuple[str, tuple[str, ...], float]],
+    ) -> dict[str, float]:
+        """Raw verbatim-constraint score for every asin in ``pool``.
+
+        Exposes the same per-product score :meth:`rank` uses internally, but as
+        a ``{asin: score}`` map so a fusion layer can *boost* these base scores
+        with complementary retrieval signals (BM25 / vector) rather than
+        re-deriving them. Zero-score products are kept (score ``0.0``) so the
+        caller sees the full bucket pool, not just the matched subset.
+        """
+        return {asin: self.score(asin, constraints) for asin in pool}
+
     def rank(self, pool, constraints, limit: int, rating_style: str | None = None) -> list[str]:
         """Order a candidate pool by constraint score, then rating-style-weighted popularity.
 
